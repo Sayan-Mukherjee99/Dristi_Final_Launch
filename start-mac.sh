@@ -29,7 +29,7 @@ if [ ! -f "server/.venv/bin/python" ]; then
   exit 1
 fi
 
-server/.venv/bin/python -m uvicorn app.main:app \
+PYTHONPATH=server server/.venv/bin/python -m uvicorn app.main:app \
   --host 0.0.0.0 --port 8000 \
   --log-level info \
   > /tmp/drishti-backend.log 2>&1 &

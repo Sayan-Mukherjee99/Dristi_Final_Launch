@@ -7,13 +7,17 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-import torch.nn.functional as F
-
+try:
+    import torch
+    import torch.nn.functional as F
+    from ml.models.fusion import FusionDetector
+    from ml.models.gnn import GraphNetworkDetector
+    from ml.models.temporal import LSTMDetector, TransformerDetector
+except ImportError:
+    torch = None
+    F = None
+    FusionDetector = GraphNetworkDetector = LSTMDetector = TransformerDetector = None
 from app.schemas.tracking import CurrentBehaviourOut
-from ml.models.fusion import FusionDetector
-from ml.models.gnn import GraphNetworkDetector
-from ml.models.temporal import LSTMDetector, TransformerDetector
 from ml.preprocessing.scaler import (
     CANONICAL_FEATURE_NAMES,
     INV_LABEL_MAPPING,
@@ -55,6 +59,8 @@ class ModelInferenceEngine:
         self._load_artifacts()
 
     def _load_artifacts(self) -> None:
+        if torch is None:
+            return
         scaler_p = os.path.join(self.artifacts_dir, "scaler.joblib")
         if os.path.isfile(scaler_p):
             try:
@@ -127,8 +133,8 @@ class ModelInferenceEngine:
 
     def evaluate_live_traffic(
         self,
-        seq_tensor: torch.Tensor,
-        graph_tensors: tuple[torch.Tensor, torch.Tensor] | None = None,
+        seq_tensor: Any,
+        graph_tensors: Any | None = None,
         total_packets: int = 0,
         flow_count: int = 0,
         features: dict[str, float] | None = None,

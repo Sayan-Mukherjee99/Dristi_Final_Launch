@@ -83,19 +83,19 @@ export function PairEndpointModal({ onClose }: PairEndpointModalProps) {
 
   const handlePairSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanCode = code.trim().toUpperCase();
-    if (!cleanCode) return;
+    const cleanCode = code.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (cleanCode.length !== 8) {
+      setErrorMessage("Please enter an 8-character pairing code (e.g. ABCD1234).");
+      setState("INVALID_CODE");
+      return;
+    }
     pairMutation.mutate(cleanCode);
   };
 
   const formatCodeInput = (val: string) => {
-    // Strip everything except alphanumeric, capitalize, insert dash after 4 chars
+    // Strip hyphens and non-alphanumeric, uppercase, cap at 8 characters
     const cleaned = val.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
-    if (cleaned.length > 4) {
-      setCode(`${cleaned.slice(0, 4)}-${cleaned.slice(4)}`);
-    } else {
-      setCode(cleaned);
-    }
+    setCode(cleaned);
   };
 
   const agents = agentsQuery.data ?? [];
@@ -149,14 +149,14 @@ export function PairEndpointModal({ onClose }: PairEndpointModalProps) {
                   type="text"
                   value={code}
                   onChange={(e) => formatCodeInput(e.target.value)}
-                  placeholder="e.g. AB7X-92KF"
-                  maxLength={9}
+                  placeholder="e.g. ABCD1234"
+                  maxLength={8}
                   className="flex-1 rounded border border-hairline bg-surface-1 px-3 py-2 font-mono text-sm tracking-widest text-ink uppercase placeholder:text-ink-muted/50 focus:border-accent-500 focus:outline-none"
                   autoFocus
                 />
                 <Button
                   type="submit"
-                  disabled={code.replace(/[^A-Za-z0-9]/g, "").length < 8 || state === "PAIRING"}
+                  disabled={code.replace(/[^A-Za-z0-9]/g, "").length !== 8 || state === "PAIRING"}
                   variant="primary"
                   className="px-5 font-mono text-xs"
                 >

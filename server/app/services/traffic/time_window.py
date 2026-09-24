@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 from app.services.traffic.feature_extractor import FEATURE_NAMES
 
@@ -211,7 +214,7 @@ class TimeWindowEngine:
         }
         return win
 
-    def get_sequence_tensor(self, preprocessor: Any | None = None) -> torch.Tensor:
+    def get_sequence_tensor(self, preprocessor: Any | None = None) -> Any:
         """Returns tensor of shape [1, sequence_length=5, feature_dim=27].
 
         Pads with zero-vectors if fewer than 5 windows exist yet.
@@ -231,6 +234,7 @@ class TimeWindowEngine:
                 vec = w.to_feature_vector()
             seq.append(vec)
 
-        seq = seq[-self.max_windows:]
+        if torch is None:
+            return np.array([seq], dtype=np.float32)
         tensor = torch.tensor([seq], dtype=torch.float32)
         return tensor

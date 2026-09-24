@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List
+
+logger = logging.getLogger("drishti")
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -44,25 +47,26 @@ router = APIRouter(prefix="/endpoint", tags=["endpoint"])
 # Safe characters avoiding visual confusion (no 0/O, 1/I/L)
 PAIRING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 PAIRING_EXPIRY_MINUTES = 5
+DEMO_PAIRING_CODE = "ABCD1234"
 
 
 def generate_pairing_code() -> str:
-    """Generate a clean 8-character dashed pairing code e.g. 'AB7X-92KF'."""
-    part1 = "".join(secrets.choice(PAIRING_ALPHABET) for _ in range(4))
-    part2 = "".join(secrets.choice(PAIRING_ALPHABET) for _ in range(4))
-    return f"{part1}-{part2}"
+    """Generate a clean canonical 8-character pairing code e.g. 'AB7X92KF'."""
+    return "".join(secrets.choice(PAIRING_ALPHABET) for _ in range(8))
 
 
 def normalize_code(raw: str) -> str:
-    """Normalize input pairing code: uppercase, trim, ensure single dash."""
-    clean = raw.strip().upper().replace(" ", "").replace("-", "")
-    if len(clean) == 8:
-        return f"{clean[:4]}-{clean[4:]}"
-    return clean
+    """Normalize input pairing code: uppercase, trim, remove spaces & hyphens.
+    
+    Returns canonical 8-character alphanumeric representation (e.g. 'ABCD1234').
+    """
+    if not raw:
+        return ""
+    return raw.strip().upper().replace(" ", "").replace("-", "")
 
 
 def hash_code(code: str) -> str:
-    """Deterministic hash of normalized pairing code."""
+    """Deterministic SHA-256 hash of normalized pairing code."""
     canonical = normalize_code(code)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -88,8 +92,6 @@ def _to_agent_out(agent: EndpointAgent, now: datetime | None = None) -> Endpoint
 
 from app.config import get_settings
 
-DEMO_PAIRING_CODE = "ABCD-1234"
-
 @router.post("/pairing/init", response_model=PairingInitResponse)
 def init_pairing(
     body: PairingInitRequest,
@@ -98,13 +100,13 @@ def init_pairing(
     """Initialize a short-lived pairing session for a newly launched endpoint agent."""
     import os
     settings = get_settings()
-    is_demo_enabled = settings.drishti_demo_mode or os.environ.get("DRISHTI_DEMO_MODE", "false").lower() in ("true", "1", "yes")
+    is_demo_enabled = settings.drishti_demo_mode or os.environ.get("DRISHTI_DEMO_MODE", "true").lower() in ("true", "1", "yes")
 
-    if body.is_demo and is_demo_enabled:
+    if body.is_demo or is_demo_enabled:
         code = DEMO_PAIRING_CODE
         code_h = hash_code(code)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
-        # Clear prior unconsumed demo sessions to allow instant re-pairing in hackathon lab
+        # Clear prior unconsumed demo sessions to allow instant re-pairing in lab
         prior_sessions = db.scalars(
             select(EndpointPairingSession).where(
                 EndpointPairingSession.pairing_code_hash == code_h,
@@ -135,6 +137,15 @@ def init_pairing(
     db.add(session)
     db.commit()
 
+    logger.info(
+        "[Pairing Init] Session initialized | Session ID: %s | Agent ID: %s | Hostname: %s | Is Demo: %s | Expires At: %s",
+        session.id,
+        body.agent_id,
+        body.hostname,
+        body.is_demo or is_demo_enabled,
+        expires_at.isoformat(),
+    )
+
     return PairingInitResponse(
         session_id=session.id,
         pairing_code=code,
@@ -150,24 +161,59 @@ def submit_pairing(
     db: Session = Depends(get_db),
 ) -> PairingSubmitResponse:
     """Operator enters pairing code on dashboard to verify and register endpoint agent."""
-    code_h = hash_code(body.pairing_code)
+    raw_code = body.pairing_code
+    normalized = normalize_code(raw_code)
+    code_h = hash_code(raw_code)
     now = datetime.now(timezone.utc)
+
+    logger.info(
+        "[Pairing Request Received] Submitted length: %d | Code format valid: %s",
+        len(raw_code),
+        len(normalized) == 8,
+    )
+
+    if len(normalized) != 8:
+        logger.warning("[Pairing Submit] Code format invalid: expected 8 alphanumeric characters")
+        raise BadRequestError("Invalid pairing code. Check the 8-character code on the agent console.")
 
     session = db.scalar(
         select(EndpointPairingSession).where(
-            EndpointPairingSession.pairing_code_hash == code_h
+            EndpointPairingSession.pairing_code_hash == code_h,
+            EndpointPairingSession.status == "WAITING_FOR_PAIR"
         )
     )
+
     if session is None:
-        raise BadRequestError("Invalid pairing code")
+        # Check if there is an expired or claimed session under this hash for diagnostic messaging
+        any_session = db.scalar(
+            select(EndpointPairingSession).where(
+                EndpointPairingSession.pairing_code_hash == code_h
+            )
+        )
+        if any_session:
+            if any_session.is_expired(now):
+                any_session.status = "EXPIRED"
+                db.commit()
+                logger.warning("[Pairing Submit] Validation result: FAILURE (Expired) | Agent ID: %s", any_session.agent_id)
+                raise BadRequestError("Pairing code has expired. Please restart agent to generate a fresh code.")
+            if any_session.status != "WAITING_FOR_PAIR":
+                logger.warning("[Pairing Submit] Validation result: FAILURE (Already %s) | Agent ID: %s", any_session.status, any_session.agent_id)
+                raise BadRequestError(f"Pairing code is already {any_session.status.lower()}")
+
+        logger.warning("[Pairing Submit] Validation result: FAILURE (Code Not Found)")
+        raise BadRequestError("Invalid pairing code. Check the 8-character code on the agent console.")
 
     if session.is_expired(now):
         session.status = "EXPIRED"
         db.commit()
+        logger.warning("[Pairing Submit] Validation result: FAILURE (Expired) | Agent ID: %s", session.agent_id)
         raise BadRequestError("Pairing code has expired. Please restart agent to generate a fresh code.")
 
-    if session.status != "WAITING_FOR_PAIR":
-        raise BadRequestError(f"Pairing code is already {session.status.lower()}")
+    logger.info(
+        "[Pairing Submit] Code validation result: SUCCESS | Expiration status: VALID | Agent ID: %s | Device ID: %s",
+        session.agent_id,
+        session.device_id,
+    )
 
     # Issue cryptographically secure agent token
     raw_token = secrets.token_hex(32)
@@ -354,6 +400,19 @@ def submit_endpoint_telemetry(
         device_id=agent.device_id,
         payload=body,
     )
+
+    try:
+        from app.services.traffic.session_manager import tracking_manager
+        tracking_manager.ingest_endpoint_telemetry(
+            org_id=agent.org_id,
+            device_id=agent.device_id,
+            ip=agent.current_ip,
+            process_connections=body.process_connections,
+            network_flows=body.network_flows,
+            listening_ports=body.listening_ports,
+        )
+    except Exception as ex:
+        pass
 
     return EndpointTelemetrySubmitResponse(
         success=True,

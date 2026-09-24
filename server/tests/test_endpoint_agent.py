@@ -53,8 +53,7 @@ def test_pairing_initialization(client: TestClient, db_session: Session):
     assert "session_id" in data
     assert "pairing_code" in data
     code = data["pairing_code"]
-    assert len(code) == 9  # XXXX-XXXX
-    assert "-" in code
+    assert len(code) == 8  # 8 alphanumeric characters (e.g. ABCD1234)
 
     # Verify stored in DB
     sess = db_session.get(EndpointPairingSession, data["session_id"])

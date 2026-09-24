@@ -82,3 +82,36 @@ class BaseHardwareCollector(ABC):
     def collect_network_interfaces(self) -> list[NetworkInterfaceInfo]:
         """Return a list of active network interfaces with their addresses."""
         pass
+
+
+class BaseSystemCollector(ABC):
+    """Abstract base class for operating system and host metadata collection."""
+
+    @abstractmethod
+    def collect_system(self) -> Any:
+        pass
+
+
+class BaseStorageCollector(ABC):
+    """Abstract base class for storage and disk usage collection."""
+
+    @abstractmethod
+    def collect_storage(self) -> Any:
+        pass
+
+
+class BaseSecurityCollector(ABC):
+    """Abstract base class for operating system security posture collection."""
+
+    @abstractmethod
+    def collect_security(self) -> Any:
+        pass
+
+
+class BasePermissionManager(ABC):
+    """Abstract base class for platform permission and entitlement management."""
+
+    @abstractmethod
+    def collect_permissions(self) -> list[Any]:
+        pass
+

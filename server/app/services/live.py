@@ -1634,9 +1634,10 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
             if not process_connections_list and ep_telem.process_connections:
                 process_connections_list = [
                     ActivityItem(
-                        name=f"{c.process_name} ({c.local_port} -> {c.remote_address}:{c.remote_port})",
-                        state=c.state,
-                        pid=c.pid,
+                        name=f"{c.process_name or 'socket'}",
+                        details=f"{c.local_port} -> {c.remote_address}:{c.remote_port} ({c.state})",
+                        evidence_type="PROCESS_SOCKET",
+                        source="endpoint_agent",
                         observed_at=c.observed_at,
                     )
                     for c in ep_telem.process_connections
@@ -1840,6 +1841,28 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
                             possible_vpn=classified["possible_vpn"],
                             evidence_source="dns_query_log",
                             confidence=classified["confidence"],
+                        )
+                    )
+
+        # Also include active socket destinations reported by endpoint agent
+        if ep_telem and ep_telem.process_connections:
+            for c in ep_telem.process_connections:
+                raddr = (c.remote_address or "").strip()
+                if raddr and raddr not in ("0.0.0.0", "::", "127.0.0.1", "localhost") and raddr not in dev_dest_seen_keys:
+                    dev_dest_seen_keys.add(raddr)
+                    dev_dest_records.append(
+                        PassiveDestinationRecord(
+                            domain=raddr,
+                            resolved_service_label=c.process_name or "Socket Connection",
+                            category="Network Socket",
+                            protocol=c.protocol or "TCP",
+                            connection_count=1,
+                            first_seen=c.observed_at or now_time,
+                            last_seen=c.observed_at or now_time,
+                            possible_vpn=False,
+                            evidence_source="endpoint_agent_socket",
+                            confidence="high",
+                            dest_port=c.remote_port,
                         )
                     )
 

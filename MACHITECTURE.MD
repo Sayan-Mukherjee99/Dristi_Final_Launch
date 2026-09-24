@@ -4,7 +4,8 @@
 > **Target Release:** Drishti Enterprise v1.0 / Hackathon Championship Edition  
 > **Status:** Approved & Active  
 > **Architecture Pattern:** Modular Monolithic Micro-Services · Verification-First Archify Topology · Event-Driven Ingestion  
-> **Repository Layout:** `server/` (FastAPI backend), `web/` (React/TS frontend), `endpoint-agent/` (cross-platform daemon), `agent/` (passive watchers), `extension/` (Chrome MV3)
+> **Repository Layout:** `server/` (FastAPI backend), `web/` (React/TS frontend), `endpoint-agent/` (cross-platform daemon), `agent/` (passive watchers), `extension/` (Chrome MV3)  
+> **Specialized Architecture Specifications:** [MACOS_ARCHITECTURE.MD](MACOS_ARCHITECTURE.MD) (Native macOS Endpoint & Archify Topology) · [NETWORK_ARCHITECTURE.MD](NETWORK_ARCHITECTURE.MD) (Network Engine & Flow Capture) · [AI_ARCHITECTURE.MD](AI_ARCHITECTURE.MD) (Graph Neural Network & Forecasting Engine)
 
 ---
 

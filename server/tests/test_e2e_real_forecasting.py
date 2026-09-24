@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import pytest
+torch = pytest.importorskip("torch")
 from app.services.traffic.session_manager import ActiveTrackingSession, SessionManager
 
 

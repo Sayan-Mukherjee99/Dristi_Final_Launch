@@ -48,6 +48,9 @@ class ActiveTrackingSession:
         target_mac: str | None = None,
         target_hostname: str | None = None,
         capture_source: str = "SCAPY / MONITORED INTERFACE",
+        has_endpoint_agent: bool = False,
+        agent_id: str | None = None,
+        endpoint_device_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.org_id = org_id
@@ -59,6 +62,9 @@ class ActiveTrackingSession:
         self.ended_at: datetime | None = None
         self.status = "LIVE"
         self.capture_source = capture_source
+        self.has_endpoint_agent = has_endpoint_agent
+        self.agent_id = agent_id
+        self.endpoint_device_id = endpoint_device_id
         self.status_message: str | None = None
         self.previous_features: dict[str, float] | None = None
 
@@ -93,10 +99,136 @@ class ActiveTrackingSession:
             on_packet=_on_packet_ingest,
         )
 
+    def ingest_telemetry(
+        self,
+        process_connections: list[Any] | None = None,
+        network_flows: list[Any] | None = None,
+        listening_ports: list[Any] | None = None,
+    ) -> int:
+        """Ingest endpoint socket connections and network flows into aggregator and time window engine."""
+        ingested = 0
+        now = time.time()
+
+        if process_connections:
+            for conn in process_connections:
+                if isinstance(conn, dict):
+                    laddr = conn.get("local_address") or self.target_ip
+                    raddr = conn.get("remote_address")
+                    lport = conn.get("local_port") or 0
+                    rport = conn.get("remote_port") or 0
+                    proto = conn.get("protocol") or "TCP"
+                    state = conn.get("state") or "ESTABLISHED"
+                else:
+                    laddr = getattr(conn, "local_address", None) or self.target_ip
+                    raddr = getattr(conn, "remote_address", None)
+                    lport = getattr(conn, "local_port", 0) or 0
+                    rport = getattr(conn, "remote_port", 0) or 0
+                    proto = getattr(conn, "protocol", "TCP") or "TCP"
+                    state = getattr(conn, "state", "ESTABLISHED") or "ESTABLISHED"
+
+                # Filter out empty or listening local-only without remote
+                if not raddr or raddr in ("0.0.0.0", "::", "127.0.0.1", "localhost") and laddr in ("0.0.0.0", "::", "127.0.0.1"):
+                    continue
+
+                proto_num = 6 if str(proto).upper() == "TCP" else (17 if str(proto).upper() == "UDP" else 6)
+                is_estab = "ESTAB" in str(state).upper()
+                tcp_flags = {
+                    "ESTABLISHED": is_estab,
+                    "SYN": "SYN" in str(state).upper(),
+                    "ACK": is_estab,
+                    "FIN": "FIN" in str(state).upper() or "CLOSE" in str(state).upper(),
+                    "RST": "RESET" in str(state).upper(),
+                    "PSH": is_estab,
+                    "URG": False,
+                }
+
+                # Forward packet: target -> remote
+                acc = self.aggregator.ingest_packet(
+                    src_ip=self.target_ip,
+                    dst_ip=str(raddr).strip(),
+                    src_port=int(lport),
+                    dst_port=int(rport),
+                    protocol=proto_num,
+                    length=64,
+                    tcp_flags=tcp_flags,
+                    timestamp=now,
+                )
+                if acc:
+                    self.window_engine.ingest_event(
+                        src_ip=self.target_ip,
+                        dst_ip=str(raddr).strip(),
+                        src_port=int(lport),
+                        dst_port=int(rport),
+                        protocol=proto_num,
+                        length=64,
+                        tcp_flags=tcp_flags,
+                        timestamp=now,
+                    )
+                    # Reverse packet: remote -> target (establish bidirectional flow)
+                    self.aggregator.ingest_packet(
+                        src_ip=str(raddr).strip(),
+                        dst_ip=self.target_ip,
+                        src_port=int(rport),
+                        dst_port=int(lport),
+                        protocol=proto_num,
+                        length=128,
+                        tcp_flags={"ACK": True, "ESTABLISHED": is_estab},
+                        timestamp=now,
+                    )
+                    ingested += 1
+
+        if network_flows:
+            for flow in network_flows:
+                if isinstance(flow, dict):
+                    src = flow.get("src_ip") or self.target_ip
+                    dst = flow.get("dst_ip") or flow.get("destination_ip") or ""
+                    sport = flow.get("src_port") or flow.get("source_port") or 0
+                    dport = flow.get("dst_port") or flow.get("destination_port") or 0
+                    proto = flow.get("protocol") or 6
+                    bytes_val = flow.get("bytes") or flow.get("total_bytes") or 64
+                else:
+                    src = getattr(flow, "src_ip", None) or self.target_ip
+                    dst = getattr(flow, "dst_ip", None) or getattr(flow, "destination_ip", "")
+                    sport = getattr(flow, "src_port", 0) or getattr(flow, "source_port", 0) or 0
+                    dport = getattr(flow, "dst_port", 0) or getattr(flow, "destination_port", 0) or 0
+                    proto = getattr(flow, "protocol", 6) or 6
+                    bytes_val = getattr(flow, "bytes", 64) or getattr(flow, "total_bytes", 64) or 64
+
+                if not dst:
+                    continue
+
+                proto_num = 6 if str(proto).upper() == "TCP" or proto == 6 else (17 if str(proto).upper() == "UDP" or proto == 17 else 1)
+                acc = self.aggregator.ingest_packet(
+                    src_ip=str(src).strip(),
+                    dst_ip=str(dst).strip(),
+                    src_port=int(sport),
+                    dst_port=int(dport),
+                    protocol=proto_num,
+                    length=int(bytes_val),
+                    timestamp=now,
+                )
+                if acc:
+                    self.window_engine.ingest_event(
+                        src_ip=str(src).strip(),
+                        dst_ip=str(dst).strip(),
+                        src_port=int(sport),
+                        dst_port=int(dport),
+                        protocol=proto_num,
+                        length=int(bytes_val),
+                        timestamp=now,
+                    )
+                    ingested += 1
+
+        return ingested
+
     def start(self) -> None:
         success = self.capture_adapter.start()
         if not success:
-            if not self.capture_adapter.available:
+            if self.has_endpoint_agent:
+                # Scapy is secondary; primary capture source is Endpoint Agent
+                self.status = "LIVE"
+                self.status_message = None
+            elif not self.capture_adapter.available:
                 self.status = "UNAVAILABLE"
                 self.status_message = self.capture_adapter.error_message or "Live traffic capture unavailable from this monitoring point."
                 self.capture_source = "UNAVAILABLE"
@@ -130,8 +262,42 @@ class SessionManager:
     ) -> TrackingSessionOut:
         session_id = str(uuid4())
 
-        # Determine capture source context
-        capture_source = "SCAPY / MONITORED INTERFACE"
+        # Check if target device has an authorized EndpointAgent
+        from app.models.endpoint import EndpointAgent
+        from app.models.live import NetworkDevice
+        import app.services.endpoint_telemetry as ep_telem_svc
+
+        agent = db.scalar(
+            select(EndpointAgent).where(
+                EndpointAgent.org_id == org_id,
+                (EndpointAgent.device_id == device_id)
+                | ((EndpointAgent.current_ip.is_not(None)) & (EndpointAgent.current_ip == ip))
+                | ((EndpointAgent.mac.is_not(None)) & (EndpointAgent.mac == mac))
+                | ((EndpointAgent.hostname.is_not(None)) & (EndpointAgent.hostname == hostname))
+                | (EndpointAgent.agent_id == device_id)
+            )
+        )
+        if not agent:
+            net_dev = db.get(NetworkDevice, device_id)
+            if net_dev and net_dev.source_agent_id:
+                agent = db.scalar(
+                    select(EndpointAgent).where(
+                        EndpointAgent.org_id == org_id,
+                        EndpointAgent.agent_id == net_dev.source_agent_id
+                    )
+                )
+
+        has_endpoint_agent = False
+        agent_id = None
+        endpoint_device_id = None
+        if agent:
+            has_endpoint_agent = True
+            agent_id = agent.agent_id
+            endpoint_device_id = agent.device_id
+            os_label = (agent.os or "HOST").upper()
+            capture_source = f"ENDPOINT AGENT ({os_label}) / TELEMETRY INGESTION"
+        else:
+            capture_source = "SCAPY / MONITORED INTERFACE"
 
         # Create active in-memory session
         active = ActiveTrackingSession(
@@ -142,8 +308,24 @@ class SessionManager:
             target_mac=mac,
             target_hostname=hostname,
             capture_source=capture_source,
+            has_endpoint_agent=has_endpoint_agent,
+            agent_id=agent_id,
+            endpoint_device_id=endpoint_device_id,
         )
         active.start()
+
+        # Ingest existing endpoint telemetry immediately if present
+        if has_endpoint_agent:
+            existing_telem = ep_telem_svc.get_telemetry_for_device(org_id, endpoint_device_id or device_id)
+            if not existing_telem and agent and agent.device_id:
+                existing_telem = ep_telem_svc.get_telemetry_for_device(org_id, agent.device_id)
+            if existing_telem:
+                active.ingest_telemetry(
+                    process_connections=existing_telem.process_connections,
+                    network_flows=existing_telem.network_flows,
+                    listening_ports=existing_telem.listening_ports,
+                )
+
         self._active_sessions[session_id] = active
 
         # Persist session row in database
@@ -285,6 +467,19 @@ class SessionManager:
                 forecast=None,
             )
 
+        # If this device has an endpoint agent, re-sync latest telemetry to ingest fresh sockets
+        if active.has_endpoint_agent or active.endpoint_device_id:
+            import app.services.endpoint_telemetry as ep_telem_svc
+            latest_telem = ep_telem_svc.get_telemetry_for_device(org_id, active.endpoint_device_id or active.device_id)
+            if not latest_telem and active.endpoint_device_id:
+                latest_telem = ep_telem_svc.get_telemetry_for_device(org_id, active.endpoint_device_id)
+            if latest_telem:
+                active.ingest_telemetry(
+                    process_connections=latest_telem.process_connections,
+                    network_flows=latest_telem.network_flows,
+                    listening_ports=latest_telem.listening_ports,
+                )
+
         summary = active.aggregator.get_summary_metrics()
         protocols_dict = active.aggregator.get_protocols()
         top_dest_raw = active.aggregator.get_top_destinations(limit=10)
@@ -333,6 +528,7 @@ class SessionManager:
             target_ip=active.target_ip,
             packets_observed=summary["packet_count"],
             session_duration=elapsed,
+            has_endpoint_agent=active.has_endpoint_agent,
         )
         if visibility_info["visibility"] == "UNAVAILABLE" and active.status == "LIVE":
             active.status_message = visibility_info["reason"]
@@ -398,6 +594,37 @@ class SessionManager:
             forecast=forecast,
         )
 
+
+    def ingest_endpoint_telemetry(
+        self,
+        org_id: str,
+        device_id: str,
+        ip: str | None = None,
+        process_connections: list[Any] | None = None,
+        network_flows: list[Any] | None = None,
+        listening_ports: list[Any] | None = None,
+    ) -> int:
+        """Find active sessions matching (org_id, device_id) or (org_id, ip) and ingest telemetry immediately."""
+        total_ingested = 0
+        for session in self._active_sessions.values():
+            if session.org_id != org_id or session.status != "LIVE":
+                continue
+            matches = (
+                session.device_id == device_id
+                or session.endpoint_device_id == device_id
+                or (ip and session.target_ip == ip)
+            )
+            if matches:
+                session.has_endpoint_agent = True
+                if not session.endpoint_device_id:
+                    session.endpoint_device_id = device_id
+                n = session.ingest_telemetry(
+                    process_connections=process_connections,
+                    network_flows=network_flows,
+                    listening_ports=listening_ports,
+                )
+                total_ingested += n
+        return total_ingested
 
     def _to_session_out(self, active: ActiveTrackingSession) -> TrackingSessionOut:
         summary = active.aggregator.get_summary_metrics()

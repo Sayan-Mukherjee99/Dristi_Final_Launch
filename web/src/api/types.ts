@@ -974,6 +974,13 @@ export interface EndpointTelemetryOut {
     security_patch?: string;
     biometric_capability?: string;
     root_detected?: boolean;
+    // macOS Security Posture fields
+    filevault?: string;
+    sip?: string;
+    gatekeeper?: string;
+    firewall?: string;
+    secure_boot?: string;
+    auto_updates?: string;
   } | null;
   applications?: {
     package_name: string;
@@ -996,10 +1003,18 @@ export interface EndpointTelemetryOut {
     locale?: string | null;
     timezone?: string | null;
     is_emulator?: boolean;
+    // macOS Device Info fields
+    hardware_model?: string;
+    os_name?: string;
+    os_version?: string;
+    os_build?: string;
+    console_user?: string;
+    load_averages?: number[];
   } | null;
   uptime_info?: {
     uptime_seconds?: number;
     boot_timestamp?: string | null;
+    boot_time?: string | null;
     last_heartbeat?: string | null;
     agent_service_running?: boolean;
   } | null;
@@ -1018,6 +1033,19 @@ export interface EndpointTelemetryOut {
     tab_visibility_capability?: string;
     history_capability?: string;
     note?: string;
+    // macOS Extended Browser Visibility
+    detected_browsers?: string[];
+    running_browsers?: string[];
+    active_tabs?: {
+      browser_name: string;
+      window_index?: number;
+      tab_index?: number;
+      title?: string | null;
+      url?: string | null;
+      domain?: string | null;
+    }[];
+    history_status?: string;
+    automation_status?: string;
   } | null;
   network_flows?: {
     destination_ip: string;
@@ -1029,9 +1057,30 @@ export interface EndpointTelemetryOut {
     last_seen?: string | null;
   }[];
   capability_status?: {
-    capability: string;
+    capability?: string;
+    name?: string;
     status: string;
     detail?: string | null;
+    details?: string | null;
+    remediation?: string | null;
   }[];
+  process_events?: {
+    event_type: string;
+    pid: number;
+    name: string;
+    ppid?: number | null;
+    exe_path?: string | null;
+    cmdline?: string[] | null;
+    signing_status?: string;
+    team_id?: string | null;
+    bundle_id?: string | null;
+    username?: string | null;
+    is_suspicious?: boolean;
+    suspicious_reason?: string | null;
+    timestamp?: string;
+    source?: string;
+  }[];
+  macos_telemetry?: Record<string, any> | null;
 }
+
 

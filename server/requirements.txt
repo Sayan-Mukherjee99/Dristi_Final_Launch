@@ -39,3 +39,4 @@ pyyaml
 pyjwt
 python-whois
 email-validator
+scapy

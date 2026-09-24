@@ -104,6 +104,12 @@ def register_error_handlers(app: FastAPI) -> None:
             {"loc": ".".join(str(p) for p in e.get("loc", [])), "msg": e.get("msg", "")}
             for e in exc.errors()
         ]
+        logger.warning(
+            "Request validation failed on %s %s: %s",
+            request.method,
+            request.url.path,
+            fields,
+        )
         return JSONResponse(
             status_code=422,
             content=envelope("validation_error", "Request validation failed", fields),

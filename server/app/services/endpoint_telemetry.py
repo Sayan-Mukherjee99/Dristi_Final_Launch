@@ -122,6 +122,8 @@ def record_telemetry(
             "browser_visibility": payload.browser_visibility or (existing.get("browser_visibility") if existing else None),
             "network_flows": list(payload.network_flows or (existing.get("network_flows", []) if existing else [])),
             "capability_status": list(payload.capability_status or (existing.get("capability_status", []) if existing else [])),
+            "process_events": list(payload.process_events or (existing.get("process_events", []) if existing else [])),
+            "macos_telemetry": payload.macos_telemetry or (existing.get("macos_telemetry") if existing else None),
             "last_updated_mono": now_mono,
             "last_updated": now_utc,
             "last_software_updated_mono": software_mono,
@@ -135,6 +137,18 @@ def record_telemetry(
             correlate_device_software(org_id, device_id)
         except Exception as exc:
             logger.warning("[Vuln Correlation] Error during telemetry ingestion: %s", exc)
+
+    try:
+        from app.services.traffic.session_manager import tracking_manager
+        tracking_manager.ingest_endpoint_telemetry(
+            org_id=org_id,
+            device_id=device_id,
+            process_connections=record.get("process_connections"),
+            network_flows=record.get("network_flows"),
+            listening_ports=record.get("listening_ports"),
+        )
+    except Exception as ex:
+        logger.debug("[Telemetry Ingestion] Tracking session bridge notice: %s", ex)
 
     logger.info(
         "[Telemetry Ingestion] Processed for device %s (org: %s, procs: %d, ports: %d, software: %d, svcs: %d)",
@@ -213,6 +227,8 @@ def get_telemetry_for_device(
         browser_visibility=rec.get("browser_visibility"),
         network_flows=rec.get("network_flows", []),
         capability_status=rec.get("capability_status", []),
+        process_events=rec.get("process_events", []),
+        macos_telemetry=rec.get("macos_telemetry"),
         last_updated=rec.get("last_updated"),
         is_stale=is_stale,
         is_software_stale=is_software_stale,

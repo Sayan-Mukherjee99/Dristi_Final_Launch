@@ -50,7 +50,9 @@ import {
   Plug,
   Server,
   Wifi,
+  Apple,
 } from "lucide-react";
+
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { createPortal } from "react-dom";
@@ -2076,7 +2078,11 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
   const [showInterfaces, setShowInterfaces] = useState(false);
   const [showFlows, setShowFlows] = useState(false);
   const [showCapabilities, setShowCapabilities] = useState(false);
+  const [showProcessEvents, setShowProcessEvents] = useState(false);
+  const [showBrowserVis, setShowBrowserVis] = useState(false);
+  const [showStoragePartitions, setShowStoragePartitions] = useState(false);
   const status = d.paired_endpoint_status || (isPaired ? "ONLINE" : "UNPAIRED");
+
 
   const isOnline = status === "ONLINE";
   const isStale = status === "STALE";
@@ -2151,6 +2157,17 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
   const browserVis = telem?.browser_visibility;
   const networkFlows: any[] = telem?.network_flows ?? [];
   const capabilityStatus: any[] = telem?.capability_status ?? [];
+  const processEvents: any[] = telem?.process_events ?? [];
+  const storageInfo = telem?.storage_info as any;
+  const isMac = Boolean(
+    d.os_info?.toLowerCase().includes("mac") ||
+    d.paired_endpoint_os?.toLowerCase().includes("darwin") ||
+    d.paired_endpoint_os?.toLowerCase().includes("mac") ||
+    telem?.os_name?.toLowerCase().includes("darwin") ||
+    telem?.os_name?.toLowerCase().includes("mac") ||
+    devInfo?.hardware_model
+  );
+
 
   // Top processes sorted by CPU then memory
   const topProcesses = [...processes]
@@ -2264,6 +2281,17 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                     {formatExactTimestamp(d.paired_endpoint_paired_at)}
                   </div>
                 </div>
+                {foregroundApp && (
+                  <div className="col-span-2 rounded border border-indigo-500/30 bg-indigo-500/10 p-2 space-y-0.5">
+                    <div className="text-indigo-300 uppercase tracking-wider text-[8.5px]">Foreground Application</div>
+                    <div className="text-ink font-semibold flex items-center justify-between">
+                      <span>{(foregroundApp as any).label || (foregroundApp as any).name || (foregroundApp as any).package_name}</span>
+                      {(foregroundApp as any).package_name && (
+                        <span className="text-ink-muted text-[8px] font-mono">{(foregroundApp as any).package_name}</span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* ── CPU Panel ── */}
@@ -2646,47 +2674,113 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                 </div>
               )}
 
-              {/* ── Security Posture Telemetry (Android/mobile) ── */}
+              {/* ── Security Posture Telemetry (macOS & Android) ── */}
               {telem?.security_posture && (
-                <div className="rounded border border-indigo-500/20 bg-surface-1 p-2.5 space-y-2 text-[10px] font-mono">
-                  <div className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5 border-b border-hairline pb-1">
-                    <ShieldCheck className="h-3 w-3 text-indigo-400" />
-                    Device Security Posture
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5 text-[9px]">
-                    <div>
-                      <span className="text-ink-muted">Screen Lock: </span>
-                      <span className={(telem.security_posture as any).screen_lock ? "text-emerald-400 font-bold" : "text-amber-400 font-bold"}>
-                        {(telem.security_posture as any).screen_lock ? "SECURE" : "UNLOCKED"}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-ink-muted">Storage: </span>
-                      <span className="text-emerald-400 font-bold">{(telem.security_posture as any).encryption || "ENCRYPTED"}</span>
-                    </div>
-                    <div>
-                      <span className="text-ink-muted">Dev Options: </span>
-                      <span className={(telem.security_posture as any).developer_options ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>
-                        {(telem.security_posture as any).developer_options ? "ENABLED" : "OFF"}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-ink-muted">USB Debug: </span>
-                      <span className={(telem.security_posture as any).usb_debugging ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>
-                        {(telem.security_posture as any).usb_debugging ? "ENABLED" : "OFF"}
-                      </span>
-                    </div>
-                    {(telem.security_posture as any).security_patch && (
-                      <div className="col-span-2">
-                        <span className="text-ink-muted">Security Patch: </span>
-                        <span className="text-ink font-semibold">{(telem.security_posture as any).security_patch}</span>
+                (() => {
+                  const sec = telem.security_posture as any;
+                  const isMacSec = Boolean(sec.filevault != null || sec.sip != null || isMac);
+                  if (isMacSec) {
+                    const badgeStyle = (st?: string) => {
+                      const u = (st || "").toUpperCase();
+                      if (u === "ENABLED" || u === "SECURE") return "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+                      if (u === "DISABLED" || u === "UNLOCKED") return "bg-rose-500/10 text-rose-400 border-rose-500/30";
+                      if (u.includes("PERMISSION")) return "bg-purple-500/10 text-purple-400 border-purple-500/30";
+                      return "bg-neutral-500/10 text-ink-muted border-neutral-500/30";
+                    };
+                    return (
+                      <div className="rounded border border-indigo-500/20 bg-surface-1 p-2.5 space-y-2 text-[10px] font-mono">
+                        <div className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider flex items-center justify-between border-b border-hairline pb-1">
+                          <span className="flex items-center gap-1.5">
+                            <ShieldCheck className="h-3 w-3 text-indigo-400" />
+                            macOS Security Posture
+                          </span>
+                          <span className="rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.2 text-[8px] font-bold text-indigo-300">
+                            APPLE SOC DEFENSE
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[9px]">
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-ink-muted text-[8px]">FileVault Encryption</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${badgeStyle(sec.filevault)}`}>
+                              {sec.filevault || "UNKNOWN"}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-ink-muted text-[8px]">SIP (System Integrity)</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${badgeStyle(sec.sip)}`}>
+                              {sec.sip || "UNKNOWN"}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-ink-muted text-[8px]">Gatekeeper</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${badgeStyle(sec.gatekeeper)}`}>
+                              {sec.gatekeeper || "UNKNOWN"}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-ink-muted text-[8px]">Application Firewall</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${badgeStyle(sec.firewall)}`}>
+                              {sec.firewall || "UNKNOWN"}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-ink-muted text-[8px]">Secure Boot</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${badgeStyle(sec.secure_boot)}`}>
+                              {sec.secure_boot || "NOT_APPLICABLE"}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-ink-muted text-[8px]">Automatic Updates</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${badgeStyle(sec.auto_updates)}`}>
+                              {sec.auto_updates || "UNKNOWN"}
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </div>
+                    );
+                  }
+                  return (
+                    <div className="rounded border border-indigo-500/20 bg-surface-1 p-2.5 space-y-2 text-[10px] font-mono">
+                      <div className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5 border-b border-hairline pb-1">
+                        <ShieldCheck className="h-3 w-3 text-indigo-400" />
+                        Device Security Posture
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 text-[9px]">
+                        <div>
+                          <span className="text-ink-muted">Screen Lock: </span>
+                          <span className={sec.screen_lock ? "text-emerald-400 font-bold" : "text-amber-400 font-bold"}>
+                            {sec.screen_lock ? "SECURE" : "UNLOCKED"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-ink-muted">Storage: </span>
+                          <span className="text-emerald-400 font-bold">{sec.encryption || "ENCRYPTED"}</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-muted">Dev Options: </span>
+                          <span className={sec.developer_options ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>
+                            {sec.developer_options ? "ENABLED" : "OFF"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-ink-muted">USB Debug: </span>
+                          <span className={sec.usb_debugging ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>
+                            {sec.usb_debugging ? "ENABLED" : "OFF"}
+                          </span>
+                        </div>
+                        {sec.security_patch && (
+                          <div className="col-span-2">
+                            <span className="text-ink-muted">Security Patch: </span>
+                            <span className="text-ink font-semibold">{sec.security_patch}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
               )}
 
-              {/* ── Installed Android Applications ── */}
+              {/* ── Installed Applications ── */}
               {telem?.applications && telem.applications.length > 0 && (
                 <div className="rounded border border-hairline bg-surface-1 p-2.5 space-y-1.5 text-[10px] font-mono">
                   <div className="text-[9px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between border-b border-hairline pb-1">
@@ -2698,11 +2792,11 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                   </div>
                   <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
                     {telem.applications.map((app: any, idx: number) => (
-                      <div key={`${app.package_name}-${idx}`} className="flex items-center justify-between rounded bg-surface-2 px-2 py-1">
+                      <div key={`${app.package_name || app.name}-${idx}`} className="flex items-center justify-between rounded bg-surface-2 px-2 py-1">
                         <div className="flex items-center gap-1.5 truncate max-w-[200px]">
-                          <span className="text-ink font-medium truncate">{app.label || app.package_name}</span>
-                          {app.version_name && (
-                            <span className="text-[8.5px] text-ink-muted">v{app.version_name}</span>
+                          <span className="text-ink font-medium truncate">{app.label || app.name || app.package_name}</span>
+                          {(app.version_name || app.version) && (
+                            <span className="text-[8.5px] text-ink-muted">v{app.version_name || app.version}</span>
                           )}
                         </div>
                         <span className="rounded border border-hairline px-1 py-0.2 text-[8px] text-ink-muted shrink-0">
@@ -2714,8 +2808,72 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                 </div>
               )}
 
-              {/* ── Android Device Specs & Uptime ── */}
-              {(devInfo || uptimeInfo) && (
+              {/* ── Platform & Host Specs (macOS vs Android) ── */}
+              {isMac && (devInfo || uptimeInfo) ? (
+                <div className="rounded border border-sky-500/20 bg-surface-1 p-2.5 space-y-2 text-[10px] font-mono">
+                  <div className="text-[9px] font-bold text-sky-400 uppercase tracking-wider flex items-center justify-between border-b border-hairline pb-1">
+                    <span className="flex items-center gap-1.5">
+                      <Apple className="h-3 w-3 text-sky-400" />
+                      macOS Host &amp; Uptime Telemetry
+                    </span>
+                    <span className="rounded bg-sky-500/10 border border-sky-500/30 px-1.5 py-0.5 text-[8px] text-sky-400 font-bold">
+                      {devInfo?.hardware_model || "APPLE SILICON / INTEL"}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 text-[8.5px]">
+                    {devInfo?.hardware_model && (
+                      <div>
+                        <span className="text-ink-muted">Model Identifier: </span>
+                        <span className="text-ink font-semibold">{devInfo.hardware_model}</span>
+                      </div>
+                    )}
+                    {devInfo?.architecture && (
+                      <div>
+                        <span className="text-ink-muted">Architecture: </span>
+                        <span className="text-ink">{devInfo.architecture}</span>
+                      </div>
+                    )}
+                    {devInfo?.os_version && (
+                      <div>
+                        <span className="text-ink-muted">macOS Version: </span>
+                        <span className="text-ink font-semibold">{devInfo.os_version}{devInfo.os_build ? ` (${devInfo.os_build})` : ""}</span>
+                      </div>
+                    )}
+                    {devInfo?.console_user && (
+                      <div>
+                        <span className="text-ink-muted">Console User: </span>
+                        <span className="text-ink font-semibold">{devInfo.console_user}</span>
+                      </div>
+                    )}
+                    {devInfo?.kernel_version && (
+                      <div>
+                        <span className="text-ink-muted">Kernel: </span>
+                        <span className="text-ink truncate" title={devInfo.kernel_version}>{devInfo.kernel_version}</span>
+                      </div>
+                    )}
+                    {uptimeInfo?.uptime_seconds != null && (
+                      <div>
+                        <span className="text-ink-muted">Uptime: </span>
+                        <span className="text-emerald-400 font-bold">
+                          {Math.floor(uptimeInfo.uptime_seconds / 3600)}h {Math.floor((uptimeInfo.uptime_seconds % 3600) / 60)}m
+                        </span>
+                      </div>
+                    )}
+                    {uptimeInfo?.boot_time && (
+                      <div className="col-span-2">
+                        <span className="text-ink-muted">Boot Time: </span>
+                        <span className="text-ink">{formatExactTimestamp(uptimeInfo.boot_time)}</span>
+                      </div>
+                    )}
+                    {devInfo?.load_averages && devInfo.load_averages.length > 0 && (
+                      <div className="col-span-2">
+                        <span className="text-ink-muted">Load Average (1m, 5m, 15m): </span>
+                        <span className="text-accent-300 font-semibold">{devInfo.load_averages.join(" · ")}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (devInfo || uptimeInfo) ? (
                 <div className="rounded border border-sky-500/20 bg-surface-1 p-2.5 space-y-2 text-[10px] font-mono">
                   <div className="text-[9px] font-bold text-sky-400 uppercase tracking-wider flex items-center justify-between border-b border-hairline pb-1">
                     <span className="flex items-center gap-1.5">
@@ -2775,64 +2933,172 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                     )}
                   </div>
                 </div>
-              )}
+              ) : null}
 
-              {/* ── Foreground App & Browser Visibility ── */}
-              {(foregroundApp || browserVis) && (
-                <div className="rounded border border-amber-500/20 bg-surface-1 p-2.5 space-y-2 text-[10px] font-mono">
-                  <div className="text-[9px] font-bold text-amber-400 uppercase tracking-wider flex items-center justify-between border-b border-hairline pb-1">
-                    <span className="flex items-center gap-1.5">
-                      <Activity className="h-3 w-3 text-amber-400" />
-                      Foreground App &amp; Browser Tracking
-                    </span>
-                    <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${
-                      foregroundApp?.capability_status === "ACTIVE"
-                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
-                        : "bg-neutral-500/10 text-ink-muted border border-neutral-500/30"
-                    }`}>
-                      {foregroundApp?.capability_status || "RESTRICTED"}
-                    </span>
+              {/* ── Storage Partitions (macOS) ── */}
+              {storageInfo?.partitions && storageInfo.partitions.length > 0 && (
+                <div className="rounded border border-hairline bg-surface-1 text-[10px] font-mono">
+                  <div className="px-2.5 pt-2 pb-1 border-b border-hairline/40">
+                    <SubHeader
+                      icon={HardDrive}
+                      label="Mounted Storage Partitions"
+                      count={storageInfo.partitions.length}
+                      open={showStoragePartitions}
+                      onToggle={() => setShowStoragePartitions((p) => !p)}
+                      color="text-amber-400"
+                    />
                   </div>
-                  {foregroundApp?.package_name ? (
-                    <div className="flex items-center justify-between bg-surface-2 rounded p-1.5">
-                      <div>
-                        <div className="text-ink font-bold text-[9px]">{foregroundApp.app_name || foregroundApp.package_name}</div>
-                        <div className="text-ink-muted text-[8px]">{foregroundApp.package_name}</div>
-                      </div>
-                      {foregroundApp.usage_duration_seconds != null && (
-                        <div className="text-right">
-                          <div className="text-amber-400 font-bold text-[9px]">{foregroundApp.usage_duration_seconds}s active</div>
-                          <div className="text-ink-muted text-[7.5px]">UsageStats</div>
+                  {showStoragePartitions && (
+                    <div className="px-2.5 pb-2 pt-1 space-y-1.5 max-h-36 overflow-y-auto">
+                      {storageInfo.partitions.map((part: any, idx: number) => (
+                        <div key={idx} className="rounded bg-surface-2 p-1.5 space-y-1">
+                          <div className="flex items-center justify-between text-[8.5px]">
+                            <span className="text-ink font-bold">{part.mount_point}</span>
+                            <span className="text-ink-muted">{part.fstype}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[8px] text-ink-muted">
+                            <span>Used: {formatBytes(part.used_bytes)}</span>
+                            <span>Free: {formatBytes(part.available_bytes)}</span>
+                            <span className="text-amber-400 font-bold">{part.percent_used}%</span>
+                          </div>
                         </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-[8px] text-ink-muted">
-                      {foregroundApp?.capability_status === "PERMISSION_REQUIRED"
-                        ? "Requires Usage Access permission to view active foreground app."
-                        : "No foreground app currently active."}
+                      ))}
                     </div>
                   )}
+                </div>
+              )}
 
-                  {browserVis && (
-                    <div className="border-t border-hairline/40 pt-1.5 space-y-1">
-                      <div className="text-[8px] text-ink-muted uppercase">Installed Browsers &amp; Sandboxing</div>
-                      <div className="flex flex-wrap gap-1">
-                        {browserVis.installed_browsers?.map((b: string) => (
-                          <span key={b} className="rounded bg-surface-2 px-1.5 py-0.5 text-[8px] text-ink border border-hairline">
-                            {b}
-                          </span>
-                        ))}
+              {/* ── Active Browser Tabs & Visibility ── */}
+              {browserVis && (
+                <div className="rounded border border-amber-500/20 bg-surface-1 text-[10px] font-mono">
+                  <div className="px-2.5 pt-2 pb-1 border-b border-hairline/40">
+                    <SubHeader
+                      icon={Compass}
+                      label="Browser Visibility & Automation"
+                      count={browserVis.active_tabs?.length ?? 0}
+                      open={showBrowserVis}
+                      onToggle={() => setShowBrowserVis((p) => !p)}
+                      color="text-amber-400"
+                    />
+                  </div>
+                  {showBrowserVis && (
+                    <div className="p-2.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[8.5px] text-ink-muted uppercase tracking-wider">Automation Status</span>
+                        <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${
+                          browserVis?.automation_status === "GRANTED"
+                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                            : "bg-neutral-500/10 text-ink-muted border border-neutral-500/30"
+                        }`}>
+                          {browserVis?.automation_status || "AUTOMATION STANDBY"}
+                        </span>
                       </div>
-                      {browserVis.note && (
-                        <div className="text-[7.5px] text-ink-muted italic">
-                          ℹ {browserVis.note}
+
+                      {browserVis.active_tabs && browserVis.active_tabs.length > 0 ? (
+                        <div className="space-y-1 max-h-36 overflow-y-auto pt-1">
+                          {browserVis.active_tabs.map((tab: any, idx: number) => (
+                            <div key={idx} className="rounded bg-surface-2 p-1.5 flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-ink font-semibold text-[8.5px] truncate">{tab.title || tab.url || "Active Tab"}</div>
+                                {tab.url && <div className="text-[7.5px] text-sky-400 truncate">{tab.url}</div>}
+                              </div>
+                              <span className="rounded bg-surface-1 border border-hairline px-1 py-0.2 text-[8px] text-ink shrink-0 font-bold">
+                                {tab.browser_name}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-[8px] text-ink-muted italic py-0.5">
+                          No active tabs exposed via automation API. History is protected by macOS TCC.
+                        </div>
+                      )}
+
+                      {browserVis.installed_browsers && browserVis.installed_browsers.length > 0 && (
+                        <div className="border-t border-hairline/40 pt-1.5 space-y-1">
+                          <div className="text-[8px] text-ink-muted uppercase">Detected Browsers</div>
+                          <div className="flex flex-wrap gap-1">
+                            {browserVis.installed_browsers.map((b: string) => (
+                              <span key={b} className="rounded bg-surface-2 px-1.5 py-0.5 text-[8px] text-ink border border-hairline">
+                                {b}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
                   )}
                 </div>
               )}
+
+              {/* ── Recent Process Events (Lifecycle Stream) ── */}
+              {processEvents.length > 0 && (
+                <div className="rounded border border-sky-500/20 bg-surface-1 text-[10px] font-mono">
+                  <div className="px-2.5 pt-2 pb-1 border-b border-hairline/40">
+                    <SubHeader
+                      icon={Activity}
+                      label="Recent Process Events (Lifecycle Stream)"
+                      count={processEvents.length}
+                      open={showProcessEvents}
+                      onToggle={() => setShowProcessEvents((p) => !p)}
+                      color="text-sky-400"
+                    />
+                  </div>
+                  {showProcessEvents && (
+                    <div className="px-2.5 pb-2 pt-1 max-h-48 overflow-y-auto space-y-1">
+                      {processEvents.slice(0, 30).map((evt: any, idx: number) => {
+                        const isExec = evt.event_type === "EXEC";
+                        const isExit = evt.event_type === "EXIT";
+                        return (
+                          <div key={idx} className="rounded bg-surface-2 px-2 py-1 space-y-0.5">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className={`px-1 py-0.2 rounded font-bold text-[7.5px] ${
+                                  isExec ? "bg-sky-500/10 text-sky-400 border border-sky-500/30" :
+                                  isExit ? "bg-rose-500/10 text-rose-400 border border-rose-500/30" :
+                                  "bg-purple-500/10 text-purple-400 border border-purple-500/30"
+                                }`}>
+                                  {evt.event_type}
+                                </span>
+                                <span className="text-ink font-semibold text-[8.5px] truncate">{evt.name}</span>
+                                <span className="text-ink-muted text-[8px]">(PID {evt.pid})</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                {evt.signing_status && (
+                                  <span className={`rounded border px-1 py-0.2 text-[7.5px] font-bold ${
+                                    evt.signing_status === "SIGNED_APPLE" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" :
+                                    evt.signing_status === "SIGNED_DEVELOPER_ID" ? "bg-sky-500/10 text-sky-400 border-sky-500/30" :
+                                    evt.signing_status === "UNSIGNED" ? "bg-rose-500/10 text-rose-400 border-rose-500/30" :
+                                    "bg-neutral-500/10 text-neutral-400 border-neutral-500/30"
+                                  }`}>
+                                    [{evt.signing_status.replace("SIGNED_", "")}]
+                                  </span>
+                                )}
+                                {evt.is_suspicious && (
+                                  <span className="rounded bg-rose-500/10 border border-rose-500/40 text-rose-400 font-bold px-1 text-[7.5px]">
+                                    SUSPICIOUS
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {evt.exe_path && (
+                              <div className="text-[7.5px] text-ink-muted truncate" title={evt.exe_path}>
+                                {evt.exe_path}
+                              </div>
+                            )}
+                            {evt.suspicious_reason && (
+                              <div className="text-[7.5px] text-rose-300 font-medium">
+                                ⚠️ {evt.suspicious_reason}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
 
               {/* ── Defensive Shield Network Flows ── */}
               {networkFlows.length > 0 && (
@@ -2871,13 +3137,13 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                 </div>
               )}
 
-              {/* ── Android Platform Capability Transparency Matrix ── */}
+              {/* ── Platform Capability & macOS Permissions Matrix ── */}
               {capabilityStatus.length > 0 && (
                 <div className="rounded border border-indigo-500/20 bg-surface-1 text-[10px] font-mono">
                   <div className="px-2.5 pt-2 pb-1 border-b border-hairline/40">
                     <SubHeader
                       icon={Cpu}
-                      label="Platform Capability Matrix"
+                      label={isMac ? "macOS Permissions & Entitlements" : "Platform Capability Matrix"}
                       count={capabilityStatus.length}
                       open={showCapabilities}
                       onToggle={() => setShowCapabilities((p) => !p)}
@@ -2887,9 +3153,10 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                   {showCapabilities && (
                     <div className="px-2.5 pb-2 pt-1 max-h-48 overflow-y-auto space-y-1">
                       {capabilityStatus.map((cap: any, idx: number) => {
-                        const isSupported = cap.status === "SUPPORTED" || cap.status === "ACTIVE";
+                        const capName = cap.name || cap.capability || "Permission";
+                        const isSupported = cap.status === "SUPPORTED" || cap.status === "ACTIVE" || cap.status === "GRANTED";
                         const isRestricted = cap.status === "PLATFORM_RESTRICTED";
-                        const isPermRequired = cap.status === "PERMISSION_REQUIRED" || cap.status === "REQUIRES_USER_CONSENT";
+                        const isPermRequired = cap.status === "PERMISSION_REQUIRED" || cap.status === "REQUIRES_USER_CONSENT" || cap.status === "REQUIRES_USER_ACTION";
                         const badgeColor = isSupported
                           ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
                           : isRestricted
@@ -2899,15 +3166,20 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                           : "bg-neutral-500/10 text-ink-muted border-neutral-500/30";
 
                         return (
-                          <div key={`${cap.capability}-${idx}`} className="rounded bg-surface-2 px-2 py-1 space-y-0.5">
+                          <div key={`${capName}-${idx}`} className="rounded bg-surface-2 px-2 py-1 space-y-0.5">
                             <div className="flex items-center justify-between">
-                              <span className="text-ink font-semibold text-[8.5px]">{cap.capability}</span>
+                              <span className="text-ink font-semibold text-[8.5px]">{capName}</span>
                               <span className={`rounded border px-1.5 py-0.2 text-[7.5px] font-bold ${badgeColor}`}>
                                 {cap.status}
                               </span>
                             </div>
-                            {cap.detail && (
-                              <div className="text-[7.5px] text-ink-muted">{cap.detail}</div>
+                            {(cap.detail || cap.details) && (
+                              <div className="text-[7.5px] text-ink-muted">{cap.detail || cap.details}</div>
+                            )}
+                            {cap.remediation && (
+                              <div className="text-[7.5px] text-accent-300">
+                                Guidance: {cap.remediation}
+                              </div>
                             )}
                           </div>
                         );
@@ -2916,6 +3188,7 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
                   )}
                 </div>
               )}
+
 
               <div className="rounded border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 text-[9.5px] font-mono text-emerald-300 flex items-center gap-1.5">
                 <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-400" />

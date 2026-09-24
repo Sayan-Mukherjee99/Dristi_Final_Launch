@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PairingInitRequest(BaseModel):
@@ -52,6 +52,17 @@ class PairingSubmitResponse(BaseModel):
     agent: EndpointAgentOut
 
 
+class PairingConsumeRequest(BaseModel):
+    pairing_code: str
+    org_id: str | None = None
+
+
+class PairingConsumeResponse(BaseModel):
+    success: bool
+    message: str
+    agent: EndpointAgentOut
+
+
 class PairingStatusRequest(BaseModel):
     session_id: str
     agent_id: str
@@ -80,6 +91,7 @@ class HeartbeatResponse(BaseModel):
 
 # Phase 02 — Endpoint Telemetry Schemas
 class ProcessTelemetryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     pid: int
     name: str
     category: str = "SYSTEM_PROCESS"
@@ -88,54 +100,93 @@ class ProcessTelemetryItem(BaseModel):
     exe_path: str | None = None
     username: str | None = None
     started_at: str | None = None
+    start_time: str | None = None
     observed_at: str | None = None
+    ppid: int | None = None
+    cmdline: list[str] | None = None
+    source: str | None = None
+
+    @model_validator(mode="after")
+    def populate_started_at(self) -> "ProcessTelemetryItem":
+        if not self.started_at and self.start_time:
+            self.started_at = self.start_time
+        return self
 
 
 class SoftwareTelemetryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     name: str
     version: str | None = None
     vendor: str | None = None
+    publisher: str | None = None
     install_date: str | None = None
     install_location: str | None = None
     source: str = "registry_or_apps"
     observed_at: str | None = None
 
+    @model_validator(mode="after")
+    def populate_vendor(self) -> "SoftwareTelemetryItem":
+        if not self.vendor and self.publisher:
+            self.vendor = self.publisher
+        return self
+
 
 class ServiceTelemetryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     name: str
-    display_name: str
-    status: str
-    start_type: str = "UNKNOWN"
+    display_name: str | None = None
+    status: str = "UNKNOWN"
+    start_type: str | None = "UNKNOWN"
     pid: int | None = None
     observed_at: str | None = None
+    source: str | None = None
 
 
 class ListeningPortTelemetryItem(BaseModel):
-    port: int
+    model_config = ConfigDict(extra="ignore")
+    port: int = 0
+    local_port: int | None = None
     protocol: str = "TCP"
     bind_address: str = "0.0.0.0"
+    local_address: str | None = None
     pid: int | None = None
     process_name: str | None = None
     observed_at: str | None = None
+    source: str | None = None
+
+    @model_validator(mode="after")
+    def populate_port_and_bind(self) -> "ListeningPortTelemetryItem":
+        if (self.port == 0 or self.port is None) and self.local_port:
+            self.port = self.local_port
+        elif (self.local_port == 0 or self.local_port is None) and self.port:
+            self.local_port = self.port
+        if not self.bind_address or self.bind_address == "0.0.0.0":
+            if self.local_address:
+                self.bind_address = self.local_address
+        return self
 
 
 class SocketConnectionTelemetryItem(BaseModel):
-    pid: int
-    process_name: str
+    model_config = ConfigDict(extra="ignore")
+    pid: int | None = None
+    process_name: str | None = None
     protocol: str = "TCP"
-    local_address: str
-    local_port: int
-    remote_address: str
-    remote_port: int
-    state: str
+    local_address: str = ""
+    local_port: int = 0
+    remote_address: str = ""
+    remote_port: int = 0
+    state: str = "ESTABLISHED"
     observed_at: str | None = None
+    source: str | None = None
 
 
 class BrowserProcessTelemetryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     browser_name: str
-    pid: int
+    pid: int | None = None
     exe_path: str | None = None
     observed_at: str | None = None
+    source: str | None = None
 
 
 class CpuTelemetry(BaseModel):
@@ -194,6 +245,7 @@ class AppTelemetryItem(BaseModel):
 
 
 class EndpointTelemetrySubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     agent_id: str
     device_id: str
     timestamp: datetime
@@ -226,6 +278,8 @@ class EndpointTelemetrySubmitRequest(BaseModel):
     browser_visibility: dict[str, Any] | None = None
     network_flows: list[dict[str, Any]] | None = None
     capability_status: list[dict[str, Any]] | None = None
+    process_events: list[dict[str, Any]] | None = None
+    macos_telemetry: dict[str, Any] | None = None
 
 
 class EndpointTelemetrySubmitResponse(BaseModel):
@@ -274,6 +328,9 @@ class EndpointTelemetryOut(BaseModel):
     browser_visibility: dict[str, Any] | None = None
     network_flows: list[dict[str, Any]] = Field(default_factory=list)
     capability_status: list[dict[str, Any]] = Field(default_factory=list)
+    process_events: list[dict[str, Any]] = Field(default_factory=list)
+    macos_telemetry: dict[str, Any] | None = None
+
 
 
 # Phase 03 — Vulnerability Intelligence Schemas

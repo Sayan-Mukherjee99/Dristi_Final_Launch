@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 
 from app.schemas.tracking import ForecastResultOut, TrackingResultsOut
 from app.services.traffic.flow_aggregator import FlowRecord

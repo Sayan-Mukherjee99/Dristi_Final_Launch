@@ -350,11 +350,86 @@ class WindowsSocketCollector(BaseSocketCollector):
             except Exception:
                 continue
 
+        net_conns = []
         try:
             net_conns = psutil.net_connections(kind="inet")
         except Exception as e:
-            logger.debug("Failed to query net_connections: %s", e)
-            return listening_ports, connections
+            logger.debug("psutil.net_connections failed: %s, falling back to per-process enumeration", e)
+            for p in psutil.process_iter(["pid", "name"]):
+                try:
+                    for c in p.net_connections(kind="inet"):
+                        net_conns.append(c)
+                except Exception:
+                    continue
+
+        # If still empty on Windows, parse netstat -ano fallback
+        if not net_conns and sys.platform.startswith("win"):
+            try:
+                import subprocess
+                res = subprocess.run(
+                    ["netstat", "-ano"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 4 and parts[0].upper() in ("TCP", "UDP"):
+                            proto = parts[0].upper()
+                            l_str = parts[1]
+                            r_str = parts[2]
+                            st = parts[3] if proto == "TCP" and len(parts) >= 5 else "ESTABLISHED"
+                            pid_str = parts[-1]
+                            try:
+                                pid = int(pid_str)
+                            except ValueError:
+                                pid = None
+                            pname = pid_names.get(pid) if pid else None
+
+                            if ":" in l_str:
+                                lip, lport_s = l_str.rsplit(":", 1)
+                                try:
+                                    lport = int(lport_s)
+                                except ValueError:
+                                    continue
+                            else:
+                                continue
+
+                            if st.upper() == "LISTENING":
+                                listening_ports.append(
+                                    ListeningPortItem(
+                                        protocol=proto,
+                                        local_address=lip,
+                                        local_port=lport,
+                                        pid=pid,
+                                        process_name=pname,
+                                        observed_at=now_iso,
+                                        source=self.source_label,
+                                    )
+                                )
+                            elif ":" in r_str and r_str != "*:*":
+                                rip, rport_s = r_str.rsplit(":", 1)
+                                try:
+                                    rport = int(rport_s)
+                                except ValueError:
+                                    continue
+                                connections.append(
+                                    SocketConnectionItem(
+                                        pid=pid,
+                                        process_name=pname,
+                                        protocol=proto,
+                                        local_address=lip,
+                                        local_port=lport,
+                                        remote_address=rip,
+                                        remote_port=rport,
+                                        state=st.upper(),
+                                        observed_at=now_iso,
+                                        source=self.source_label,
+                                    )
+                                )
+            except Exception as ex:
+                logger.debug("netstat fallback encountered error: %s", ex)
 
         for conn in net_conns:
             try:

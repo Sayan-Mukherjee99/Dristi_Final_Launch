@@ -5,7 +5,10 @@ import time
 from typing import Any
 import networkx as nx
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 logger = logging.getLogger("drishti")
 
@@ -89,7 +92,7 @@ class NetworkGraphEngine:
             edge_data["packet_count"] += getattr(flow, "total_packets", 1)
             edge_data["byte_count"] += getattr(flow, "total_bytes", 64)
 
-    def get_graph_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_graph_tensors(self) -> tuple[Any, Any]:
         """Convert graph into PyTorch (node_features, adjacency_matrix) tensors.
 
         node_features shape: [N, 4] -> [is_target, log(packets+1), log(bytes+1), degree]
@@ -128,6 +131,8 @@ class NetworkGraphEngine:
         d_mat = np.diag(deg_inv_sqrt)
         norm_adj = d_mat @ adj @ d_mat
 
+        if torch is None:
+            return x, norm_adj
         return torch.tensor(x, dtype=torch.float32), torch.tensor(norm_adj, dtype=torch.float32)
 
     def to_dict(self) -> dict[str, Any]:

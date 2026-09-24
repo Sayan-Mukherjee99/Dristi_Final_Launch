@@ -46,7 +46,7 @@ def test_android_pairing_initialization(client: TestClient, db_session: Session)
     data = res.json()
     assert "session_id" in data
     assert "pairing_code" in data
-    assert len(data["pairing_code"]) == 9  # XXXX-XXXX format
+    assert len(data["pairing_code"]) == 8  # 8 alphanumeric characters (e.g. ABCD1234)
 
     # Verify session persisted in DB
     sess = db_session.get(EndpointPairingSession, data["session_id"])
@@ -382,13 +382,13 @@ def test_android_demo_mode_and_expanded_telemetry(
     )
     assert init_res.status_code == 200
     init_data = init_res.json()
-    assert init_data["pairing_code"] == "ABCD-1234"
+    assert init_data["pairing_code"] == "ABCD1234"
     session_id = init_data["session_id"]
 
-    # Operator enters ABCD-1234
+    # Operator enters ABCD1234
     pair_res = client.post(
         "/api/endpoint/pairing/pair",
-        json={"pairing_code": "ABCD-1234"},
+        json={"pairing_code": "ABCD1234"},
         headers=user_headers,
     )
     assert pair_res.status_code == 200

@@ -7,9 +7,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import torch
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn.functional as F
+except ImportError:
+    torch = None
+    F = None
 
 from app.schemas.tracking import (
     ExplainabilityOut,
@@ -24,12 +27,15 @@ from ml.forecasting.classes import (
 from ml.forecasting.explainability import generate_forecast_explanation
 from ml.forecasting.mitre_mapping import map_to_mitre_attack
 from ml.forecasting.risk_engine import calculate_composite_risk
-from ml.models.forecaster import (
-    FusionForecaster,
-    LSTMForecaster,
-    TemporalGraphForecaster,
-    TransformerForecaster,
-)
+if torch is not None:
+    from ml.models.forecaster import (
+        FusionForecaster,
+        LSTMForecaster,
+        TemporalGraphForecaster,
+        TransformerForecaster,
+    )
+else:
+    FusionForecaster = LSTMForecaster = TemporalGraphForecaster = TransformerForecaster = None
 
 logger = logging.getLogger("drishti_forecaster")
 
@@ -64,6 +70,9 @@ class ForecastingEngine:
 
     def _load_checkpoints(self) -> None:
         """Loads trained Phase 03 forecaster checkpoints from artifacts."""
+        if torch is None:
+            logger.info("PyTorch is not available; ML forecasting checkpoints skipped.")
+            return
         # 1. Transformer Forecaster
         tf_p = os.path.join(self.artifacts_dir, "transformer_forecaster.pt")
         if os.path.isfile(tf_p):
@@ -124,7 +133,7 @@ class ForecastingEngine:
 
     def forecast_progression(
         self,
-        seq_tensor: torch.Tensor,
+        seq_tensor: Any,
         graph_engine: Any,
         current_features: dict[str, float] | None = None,
         previous_features: dict[str, float] | None = None,

@@ -1,7 +1,7 @@
 # Drishti v0.1 — Phase 02 Comprehensive Test Suite
 import os
-import torch
 import pytest
+torch = pytest.importorskip("torch")
 from app.services.traffic.capture_adapter import detect_capture_backends, TrafficVisibilityChecker
 from app.services.traffic.flow_aggregator import FlowAggregator
 from app.services.traffic.graph_engine import NetworkGraphEngine
