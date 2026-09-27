@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 try:
     import torch
     import torch.nn.functional as F
@@ -65,6 +67,9 @@ class ForecastingEngine:
         self.lstm_ready: bool = False
         self.gnn_ready: bool = False
         self.fusion_ready: bool = False
+
+        # Calibrated temperature scaling parameter for Focal Loss logit alignment (ECE reduction)
+        self.temperature: float = 0.70
 
         self._load_checkpoints()
 
@@ -180,12 +185,14 @@ class ForecastingEngine:
                 # Prefer Transformer Forecaster (92.66% Acc), fallback to LSTM
                 if self.transformer_ready and self.transformer_forecaster is not None:
                     logits, _ = self.transformer_forecaster(seq_tensor)  # [1, 3, 5]
-                    probs = F.softmax(logits, dim=-1)[0].cpu().numpy()  # [3, 5]
+                    scaled_logits = logits / max(0.01, self.temperature)
+                    probs = F.softmax(scaled_logits, dim=-1)[0].cpu().numpy()  # [3, 5]
                     forecast_probs = probs
                     model_name = "TRANSFORMER_FORECASTER"
                 elif self.lstm_ready and self.lstm_forecaster is not None:
                     logits, _ = self.lstm_forecaster(seq_tensor)
-                    probs = F.softmax(logits, dim=-1)[0].cpu().numpy()
+                    scaled_logits = logits / max(0.01, self.temperature)
+                    probs = F.softmax(scaled_logits, dim=-1)[0].cpu().numpy()
                     forecast_probs = probs
                     model_name = "LSTM_FORECASTER"
         except Exception as ex:

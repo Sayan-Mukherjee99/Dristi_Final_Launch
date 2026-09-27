@@ -355,3 +355,93 @@ def test_macos_hardware_collector_mocked():
         assert mem.percent_used == 50.0
 
 
+def test_windows_socket_internet_host_and_url_inference():
+    """Verify internet address detection, host resolution and website URL inference."""
+    from windows.collectors import _is_internet_address, _infer_website_url
+
+    # Loopback / local / private checks
+    assert not _is_internet_address("127.0.0.1")
+    assert not _is_internet_address("192.168.1.100")
+    assert not _is_internet_address("10.0.0.5")
+    assert not _is_internet_address("0.0.0.0")
+
+    # Public internet IP
+    assert _is_internet_address("142.250.190.46")  # Google IP
+    assert _is_internet_address("185.199.108.153") # GitHub IP
+
+    # URL inference
+    url_https = _infer_website_url("142.250.190.46", 443, "google.com")
+    assert url_https == "https://google.com"
+
+    url_http = _infer_website_url("93.184.216.34", 80, "example.com")
+    assert url_http == "http://example.com"
+
+    url_custom = _infer_website_url("1.2.3.4", 8080, "test-site.org")
+    assert url_custom == "http://test-site.org:8080"
+
+
+def test_windows_kernel_tcp_table_parsing():
+    """Verify unpacking of binary buffer simulating iphlpapi GetExtendedTcpTable."""
+    import socket
+    import struct
+
+    # Simulate MIB_TCPTABLE_OWNER_PID buffer with 1 entry
+    # dwNumEntries = 1
+    # Entry: state=5 (ESTABLISHED), local=192.168.1.50:52123, remote=142.250.190.46:443, pid=4321
+    local_ip_int = struct.unpack("<I", socket.inet_aton("192.168.1.50"))[0]
+    remote_ip_int = struct.unpack("<I", socket.inet_aton("142.250.190.46"))[0]
+
+    # Ports in network byte order:
+    local_port_raw = ((52123 & 0xFF) << 8) | ((52123 >> 8) & 0xFF)
+    remote_port_raw = ((443 & 0xFF) << 8) | ((443 >> 8) & 0xFF)
+
+    buf_raw = struct.pack(
+        "<IIIIIII",
+        1,              # dwNumEntries
+        5,              # dwState (ESTABLISHED)
+        local_ip_int,   # dwLocalAddr
+        local_port_raw, # dwLocalPort
+        remote_ip_int,  # dwRemoteAddr
+        remote_port_raw,# dwRemotePort
+        4321,           # dwOwningPid
+    )
+
+    num_entries = struct.unpack_from("<I", buf_raw, 0)[0]
+    assert num_entries == 1
+
+    state_code, laddr_int, lport_int, raddr_int, rport_int, pid = struct.unpack_from("<IIIIII", buf_raw, 4)
+    lport = ((lport_int & 0xFF) << 8) | ((lport_int >> 8) & 0xFF)
+    rport = ((rport_int & 0xFF) << 8) | ((rport_int >> 8) & 0xFF)
+    lip = socket.inet_ntoa(struct.pack("<I", laddr_int))
+    rip = socket.inet_ntoa(struct.pack("<I", raddr_int))
+
+    assert pid == 4321
+    assert state_code == 5
+    assert lip == "192.168.1.50"
+    assert lport == 52123
+    assert rip == "142.250.190.46"
+    assert rport == 443
+
+
+def test_socket_connection_item_destination_host_and_website_url():
+    """Verify SocketConnectionItem correctly models website and destination host."""
+    item = SocketConnectionItem(
+        pid=1234,
+        process_name="chrome.exe",
+        protocol="TCP",
+        local_address="192.168.1.50",
+        local_port=54321,
+        remote_address="142.250.190.46",
+        remote_port=443,
+        state="ESTABLISHED",
+        destination_host="google.com",
+        website_url="https://google.com",
+        source="windows_kernel_tcpip",
+    )
+    d = item.to_dict()
+    assert d["destination_host"] == "google.com"
+    assert d["website_url"] == "https://google.com"
+    assert d["source"] == "windows_kernel_tcpip"
+
+
+

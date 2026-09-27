@@ -16,6 +16,7 @@ from app.models.base import utcnow
 from app.models.tracking import LiveTrackingSession
 from app.schemas.tracking import (
     CurrentBehaviourOut,
+    FlaggedPacketOut,
     ForecastResultOut,
     LiveTrafficMetrics,
     ProtocolBreakdown,
@@ -34,6 +35,9 @@ from ml.forecasting.engine import forecasting_engine
 from ml.inference.engine import inference_engine
 
 logger = logging.getLogger("drishti")
+
+# Global URL Threat Cache: maps URL -> (monotonic_timestamp, UrlAnalysisResult)
+_GLOBAL_URL_THREAT_CACHE: dict[str, tuple[float, Any]] = {}
 
 
 class ActiveTrackingSession:
@@ -177,6 +181,13 @@ class ActiveTrackingSession:
                     )
                     ingested += 1
 
+                # If connection has website URL or internet port, analyze against vulnerable/malicious URLs
+                w_url = conn.get("website_url") if isinstance(conn, dict) else getattr(conn, "website_url", None)
+                d_host = conn.get("destination_host") if isinstance(conn, dict) else getattr(conn, "destination_host", None)
+                p_name = conn.get("process_name") if isinstance(conn, dict) else getattr(conn, "process_name", None)
+                if (self.has_endpoint_agent or getattr(self, "paired_at", None)) and (w_url or d_host or int(rport) in (80, 443, 8080, 8443)):
+                    self._evaluate_website_url(w_url, d_host, p_name, str(raddr), int(rport), int(lport))
+
         if network_flows:
             for flow in network_flows:
                 if isinstance(flow, dict):
@@ -219,7 +230,101 @@ class ActiveTrackingSession:
                     )
                     ingested += 1
 
+                # If flow has website URL or internet port, analyze against vulnerable/malicious URLs
+                w_url = flow.get("website_url") if isinstance(flow, dict) else getattr(flow, "website_url", None)
+                d_host = flow.get("destination_host") if isinstance(flow, dict) else getattr(flow, "destination_host", None)
+                p_name = flow.get("process_name") if isinstance(flow, dict) else getattr(flow, "process_name", None)
+                if (self.has_endpoint_agent or getattr(self, "paired_at", None)) and (w_url or d_host or int(dport) in (80, 443, 8080, 8443)):
+                    self._evaluate_website_url(w_url, d_host, p_name, str(dst), int(dport), int(sport))
+
         return ingested
+
+    def _evaluate_website_url(
+        self,
+        website_url: str | None,
+        destination_host: str | None,
+        process_name: str | None,
+        dst_ip: str,
+        dst_port: int,
+        src_port: int = 0,
+    ) -> None:
+        """Analyzes website URL accessed by paired device; if high-risk or malicious, alerts via Telegram."""
+        target_url = website_url
+        if not target_url and (dst_port in (80, 443, 8080, 8443) or destination_host):
+            host = destination_host or dst_ip
+            if host and host not in ("127.0.0.1", "::1", "localhost", "0.0.0.0"):
+                scheme = "https" if dst_port in (443, 8443) else "http"
+                target_url = f"{scheme}://{host}" if dst_port in (80, 443) else f"{scheme}://{host}:{dst_port}"
+
+        if not target_url or "localhost" in target_url or "127.0.0.1" in target_url:
+            return
+
+        now_mono = time.monotonic()
+        cached = _GLOBAL_URL_THREAT_CACHE.get(target_url)
+        if cached and (now_mono - cached[0] < 300):
+            res = cached[1]
+        else:
+            try:
+                from app.services.urltrust.analyzer import analyze
+                res = analyze(db=None, org_id=self.org_id, raw_url=target_url)
+                _GLOBAL_URL_THREAT_CACHE[target_url] = (now_mono, res)
+            except Exception as ex:
+                logger.debug("URL trust evaluation failed for %s: %s", target_url, ex)
+                return
+
+        # If malicious, dangerous, or suspicious
+        if res and (getattr(res, "band", "") in ("Dangerous", "Suspicious") or getattr(res, "score", 100.0) <= 40.0):
+            logger.warning(
+                "[Paired Device URL Alert] Flagged website access on %s (%s): %s [Band: %s, Score: %.1f]",
+                self.target_ip,
+                self.target_hostname or "Paired Endpoint",
+                res.url,
+                res.band,
+                res.score,
+            )
+            try:
+                from app.services.telegram_alerts import notify_paired_device_packet_risk
+
+                risk_score = round(max(0.75, (100.0 - float(res.score)) / 100.0), 2)
+                packet_info = {
+                    "src_ip": self.target_ip,
+                    "dst_ip": dst_ip or (res.website.get("host") if isinstance(res.website, dict) else getattr(res.website, "host", "External Web")),
+                    "src_port": src_port,
+                    "dst_port": dst_port or (443 if str(res.url).startswith("https") else 80),
+                    "protocol": "TCP",
+                    "packets": 1,
+                    "bytes": 512,
+                    "process_name": process_name,
+                    "website_url": res.url,
+                    "destination_host": (res.website.get("host") if isinstance(res.website, dict) else getattr(res.website, "host", None)) or destination_host,
+                    "url_trust_score": float(res.score),
+                    "url_risk_band": str(res.band),
+                    "summary": f"{process_name or 'Process'} accessed {str(res.band).lower()} website: {res.url}",
+                }
+                threat_details = (
+                    f"Paired device accessed suspicious/malicious website: {res.url}\n"
+                    f"Trust Score: {res.score:.1f}/100 (Band: {res.band})\n"
+                    f"Forensic Analysis: {res.ai_summary or 'Flagged by URL vulnerability heuristics and reputation feeds.'}"
+                )
+                recommended_action = (
+                    f"Block outbound access to {res.url} and investigate process {process_name or 'PID'} on {self.target_ip}."
+                )
+
+                notify_paired_device_packet_risk(
+                    org_id=self.org_id,
+                    device_ip=self.target_ip,
+                    packet_info=packet_info,
+                    device_name=self.target_hostname or self.target_ip,
+                    device_id=self.device_id,
+                    risk_score=risk_score,
+                    verdict="ANOMALOUS",
+                    attack_category="MALICIOUS_WEBSITE",
+                    threat_details=threat_details,
+                    forecast_progression="Web Connection ➔ Malicious Payload Download / Phishing ➔ Host Compromise",
+                    recommended_action=recommended_action,
+                )
+            except Exception as e:
+                logger.debug("Failed sending paired device website threat alert: %s", e)
 
     def start(self) -> None:
         success = self.capture_adapter.start()
@@ -235,6 +340,9 @@ class ActiveTrackingSession:
             else:
                 self.status = "ERROR"
                 self.status_message = "Failed to initiate packet sniffing."
+        else:
+            if not self.has_endpoint_agent and self.capture_adapter.capture_source:
+                self.capture_source = self.capture_adapter.capture_source
 
     def stop(self) -> None:
         self.status = "STOPPED"
@@ -396,9 +504,24 @@ class SessionManager:
         Returns None if no active LIVE session exists for this device.
         """
         for session in self._active_sessions.values():
-            if session.org_id == org_id and session.device_id == device_id and session.status == "LIVE":
+            if (
+                session.org_id == org_id
+                and session.status == "LIVE"
+                and (
+                    session.device_id == device_id
+                    or getattr(session, "endpoint_device_id", None) == device_id
+                    or getattr(session, "agent_id", None) == device_id
+                )
+            ):
                 return session
         return None
+
+    def get_active_sessions_for_org(self, org_id: str) -> list["ActiveTrackingSession"]:
+        """Return all active LIVE tracking sessions belonging to the given org."""
+        return [
+            session for session in self._active_sessions.values()
+            if session.org_id == org_id and session.status == "LIVE"
+        ]
 
     def get_session(self, db: Session, org_id: str, session_id: str) -> TrackingSessionOut:
         active = self._active_sessions.get(session_id)
@@ -465,6 +588,10 @@ class SessionManager:
                 evidence=[],
                 features=None,
                 forecast=None,
+                flagged_packets=[],
+                harmful_packet_count=0,
+                suspicious_packet_count=0,
+                normal_packet_count=0,
             )
 
         # If this device has an endpoint agent, re-sync latest telemetry to ingest fresh sockets
@@ -502,6 +629,9 @@ class SessionManager:
             features=features,
         )
 
+        # Contextualize packet inspection with neural model's active attack category
+        active.aggregator.set_active_attack_category(current_behaviour.attack_category)
+
         # Evaluate through Phase 03 Future Network Behaviour Forecasting Engine
         forecast = forecasting_engine.forecast_progression(
             seq_tensor=seq_tensor,
@@ -521,6 +651,38 @@ class SessionManager:
         active.last_detection = current_behaviour
         active.last_forecast = forecast
 
+        # Dispatch real-time Telegram alert if paired device exhibits high-risk packet flow
+        if (active.has_endpoint_agent or getattr(active, "paired_at", None)) and current_behaviour.verdict in ("ANOMALOUS", "SUSPICIOUS"):
+            try:
+                from app.services.telegram_alerts import notify_paired_device_packet_risk
+                top_d = active.aggregator.get_top_destinations(limit=1)
+                all_f = active.aggregator.get_all_flows()
+                pkt_data = {
+                    "src_ip": active.target_ip,
+                    "dst_ip": top_d[0]["destination_ip"] if top_d else "Internal Network",
+                    "src_port": getattr(all_f[0], "src_port", 0) if all_f else 0,
+                    "dst_port": top_d[0]["destination_port"] if top_d else 0,
+                    "protocol": top_d[0]["protocol"] if top_d else "TCP",
+                    "packets": top_d[0]["connection_count"] if top_d else 1,
+                    "bytes": top_d[0]["connection_count"] * 64 if top_d else 64,
+                    "summary": f"High risk packet sequence from {active.target_ip}",
+                }
+                notify_paired_device_packet_risk(
+                    org_id=active.org_id,
+                    device_ip=active.target_ip,
+                    packet_info=pkt_data,
+                    device_name=getattr(active, "hostname", None) or active.target_ip,
+                    device_id=active.device_id,
+                    risk_score=getattr(current_behaviour, "confidence", 0.88),
+                    verdict=current_behaviour.verdict,
+                    attack_category=current_behaviour.attack_category or "SUSPICIOUS_PACKET",
+                    threat_details=current_behaviour.details or "Neural model classified live packet sequence as anomalous.",
+                    forecast_progression=forecast.predicted_progression if forecast else None,
+                    recommended_action="Inspect active connections on endpoint agent and consider network quarantine.",
+                )
+            except Exception as e:
+                logger.debug("Failed sending paired device packet risk telegram alert: %s", e)
+
         # Check truthful capture status & network visibility
         now = time.time()
         elapsed = now - active.started_at.timestamp()
@@ -532,6 +694,8 @@ class SessionManager:
         )
         if visibility_info["visibility"] == "UNAVAILABLE" and active.status == "LIVE":
             active.status_message = visibility_info["reason"]
+        elif visibility_info["visibility"] == "VISIBLE" and active.status == "LIVE":
+            active.status_message = None
 
         # Build evidence items strictly retaining source identity
         evidence_items: list[TrafficEvidenceItem] = []
@@ -592,6 +756,10 @@ class SessionManager:
             window_count=len(active.window_engine._windows),
             graph_summary=active.graph_engine.to_dict(),
             forecast=forecast,
+            flagged_packets=active.aggregator.get_flagged_packets(limit=100),
+            harmful_packet_count=active.aggregator.get_packet_harm_stats()["harmful"],
+            suspicious_packet_count=active.aggregator.get_packet_harm_stats()["suspicious"],
+            normal_packet_count=active.aggregator.get_packet_harm_stats()["normal"],
         )
 
 
@@ -627,6 +795,8 @@ class SessionManager:
         return total_ingested
 
     def _to_session_out(self, active: ActiveTrackingSession) -> TrackingSessionOut:
+        if not active.has_endpoint_agent and active.capture_adapter and active.capture_adapter.capture_source:
+            active.capture_source = active.capture_adapter.capture_source
         summary = active.aggregator.get_summary_metrics()
         last_ev = (
             datetime.fromtimestamp(active.aggregator.last_event_time, tz=timezone.utc)

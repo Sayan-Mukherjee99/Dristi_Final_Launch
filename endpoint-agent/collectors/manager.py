@@ -74,6 +74,29 @@ class CollectorManager:
             self.storage_collector = storage_collector
             self.security_collector = security_collector
             self.permission_manager = permission_manager
+        elif os_name == "linux":
+            from linux.collectors import (
+                LinuxBrowserCollector,
+                LinuxHardwareCollector,
+                LinuxPermissionManager,
+                LinuxProcessCollector,
+                LinuxSecurityCollector,
+                LinuxServiceCollector,
+                LinuxSocketCollector,
+                LinuxSoftwareCollector,
+                LinuxStorageCollector,
+                LinuxSystemCollector,
+            )
+            self.process_collector = process_collector or LinuxProcessCollector()
+            self.software_collector = software_collector or LinuxSoftwareCollector()
+            self.service_collector = service_collector or LinuxServiceCollector()
+            self.socket_collector = socket_collector or LinuxSocketCollector()
+            self.browser_collector = browser_collector or LinuxBrowserCollector()
+            self.hardware_collector = hardware_collector or LinuxHardwareCollector()
+            self.system_collector = system_collector or LinuxSystemCollector()
+            self.storage_collector = storage_collector or LinuxStorageCollector()
+            self.security_collector = security_collector or LinuxSecurityCollector()
+            self.permission_manager = permission_manager or LinuxPermissionManager()
         else:
             from macos.collectors import (
                 MacOSBrowserCollector,
@@ -225,7 +248,10 @@ class CollectorManager:
                 "state": conn.state,
                 "destination_ip": conn.remote_address,
                 "destination_port": conn.remote_port,
+                "destination_host": getattr(conn, "destination_host", None),
+                "website_url": getattr(conn, "website_url", None),
                 "process_name": conn.process_name,
+                "source": getattr(conn, "source", "endpoint_sockets"),
             })
 
         return TelemetryBatch(

@@ -305,6 +305,191 @@ def _format_threat_alert(t) -> tuple[str, str]:
     return html_msg, plain_msg
 
 
+def _format_paired_device_packet_risk_alert(
+    device_ip: str,
+    device_name: str,
+    device_id: str | None,
+    packet_info: dict,
+    risk_score: float,
+    verdict: str,
+    attack_category: str,
+    threat_details: str,
+    forecast_progression: str | None = None,
+    recommended_action: str | None = None,
+    observed_at: datetime | None = None,
+) -> tuple[str, str]:
+    """Returns (html_message, plain_text_fallback) for a high-risk packet observed on a paired device."""
+    sev = "CRITICAL" if risk_score >= 0.85 or verdict.upper() == "ANOMALOUS" else "HIGH"
+    detected_time = _ist_timestamp(observed_at)
+
+    src = packet_info.get("src_ip", device_ip)
+    dst = packet_info.get("dst_ip", "unknown-dest")
+    sport = packet_info.get("src_port", 0)
+    dport = packet_info.get("dst_port", 0)
+    proto = str(packet_info.get("protocol", "TCP")).upper()
+    if proto == "6":
+        proto = "TCP"
+    elif proto == "17":
+        proto = "UDP"
+    elif proto == "1":
+        proto = "ICMP"
+
+    pkts = packet_info.get("packets", 1)
+    bytes_cnt = packet_info.get("bytes", 64)
+    proc_name = packet_info.get("process_name")
+    website_url = packet_info.get("website_url")
+    destination_host = packet_info.get("destination_host")
+    web_target = website_url or (f"http://{destination_host}:{dport}" if destination_host else None)
+    url_score = packet_info.get("url_trust_score")
+    url_band = packet_info.get("url_risk_band")
+
+    summary = packet_info.get("summary") or packet_info.get("signature") or f"{proto} flow to {dst}:{dport}"
+
+    proc_line_html = f"• <b>Process / App:</b> <code>{html.escape(proc_name)}</code>\n" if proc_name else ""
+    proc_line_plain = f"• Process / App: {proc_name}\n" if proc_name else ""
+
+    web_line_html = f"• <b>Target Website / Host:</b> <code>{html.escape(web_target)}</code>\n" if web_target else ""
+    web_line_plain = f"• Target Website / Host: {web_target}\n" if web_target else ""
+
+    url_trust_html = (
+        f"• <b>URL Trust Score:</b> <code>{url_score:.1f}/100 ({html.escape(str(url_band))})</code>\n"
+        if url_score is not None
+        else ""
+    )
+    url_trust_plain = (
+        f"• URL Trust Score: {url_score:.1f}/100 ({url_band})\n"
+        if url_score is not None
+        else ""
+    )
+
+    forecast_line_html = f"🔮 <b>Forecasting:</b> <code>{html.escape(forecast_progression)}</code>\n\n" if forecast_progression else ""
+    forecast_line_plain = f"Forecasting: {forecast_progression}\n\n" if forecast_progression else ""
+
+    rec_text = recommended_action or "Isolate device from network and inspect active connections."
+
+    html_msg = (
+        f"🚨 <b>[DRISHTI PAIRED DEVICE ALERT — {html.escape(sev)}]</b>\n"
+        f"<b>High-Risk Network Packet Detected</b>\n\n"
+        f"• <b>Device IP:</b> <code>{html.escape(device_ip)}</code>\n"
+        f"• <b>Device Name:</b> <code>{html.escape(device_name or 'Paired Endpoint')}</code>\n"
+        f"• <b>Device ID:</b> <code>{html.escape(device_id or 'unknown')}</code>\n"
+        f"• <b>Pairing Status:</b> <code>PAIRED &amp; AUTHENTICATED</code>\n"
+        f"• <b>Risk Score:</b> <code>{risk_score:.2f} ({html.escape(sev)})</code>\n"
+        f"• <b>Threat Verdict:</b> <code>{html.escape(verdict.upper())}</code>\n"
+        f"• <b>Attack Category:</b> <code>{html.escape(attack_category.upper())}</code>\n\n"
+        f"📦 <b>Suspicious Packet Details:</b>\n"
+        f"• <b>Protocol:</b> <code>{html.escape(proto)}</code>\n"
+        f"• <b>Flow:</b> <code>{html.escape(str(src))}:{sport} ➔ {html.escape(str(dst))}:{dport}</code>\n"
+        f"• <b>Volume:</b> <code>{pkts} packets ({bytes_cnt} bytes)</code>\n"
+        f"{proc_line_html}"
+        f"{web_line_html}"
+        f"{url_trust_html}"
+        f"• <b>Packet Info:</b> <code>{html.escape(summary)}</code>\n\n"
+        f"ℹ️ <b>Threat Analysis:</b>\n"
+        f"{html.escape(threat_details or 'Neural anomaly detector flagged abnormal packet sequence on paired device.')}\n\n"
+        f"{forecast_line_html}"
+        f"🛡️ <b>Recommended Action:</b>\n"
+        f"{html.escape(rec_text)}\n\n"
+        f"⏰ <b>Observed At:</b> <code>{html.escape(detected_time)}</code>\n\n"
+        f"🛡️ <i>Drishti Autonomous Paired Device Intelligence</i>"
+    )
+
+    plain_msg = (
+        f"[DRISHTI PAIRED DEVICE ALERT — {sev}]\n"
+        f"High-Risk Network Packet Detected\n\n"
+        f"• Device IP: {device_ip}\n"
+        f"• Device Name: {device_name or 'Paired Endpoint'}\n"
+        f"• Device ID: {device_id or 'unknown'}\n"
+        f"• Pairing Status: PAIRED & AUTHENTICATED\n"
+        f"• Risk Score: {risk_score:.2f} ({sev})\n"
+        f"• Threat Verdict: {verdict.upper()}\n"
+        f"• Attack Category: {attack_category.upper()}\n\n"
+        f"Suspicious Packet Details:\n"
+        f"• Protocol: {proto}\n"
+        f"• Flow: {src}:{sport} -> {dst}:{dport}\n"
+        f"• Volume: {pkts} packets ({bytes_cnt} bytes)\n"
+        f"{proc_line_plain}"
+        f"{web_line_plain}"
+        f"{url_trust_plain}"
+        f"• Packet Info: {summary}\n\n"
+        f"Threat Analysis:\n"
+        f"{threat_details or 'Neural anomaly detector flagged abnormal packet sequence on paired device.'}\n\n"
+        f"{forecast_line_plain}"
+        f"Recommended Action:\n"
+        f"{rec_text}\n\n"
+        f"Observed At: {detected_time}\n\n"
+        f"Drishti Autonomous Paired Device Intelligence"
+    )
+    return html_msg, plain_msg
+
+
+def notify_paired_device_packet_risk(
+    org_id: str,
+    device_ip: str,
+    packet_info: dict,
+    device_name: str | None = None,
+    device_id: str | None = None,
+    risk_score: float = 0.85,
+    verdict: str = "ANOMALOUS",
+    attack_category: str = "HIGH_RISK_PACKET",
+    threat_details: str = "",
+    forecast_progression: str | None = None,
+    recommended_action: str | None = None,
+    observed_at: datetime | None = None,
+    bot_token: str | None = None,
+    chat_id_conf: str | None = None,
+) -> bool:
+    """Dispatches a Telegram alert when a high-risk packet or flow is detected on a paired device.
+    
+    Includes device IP, paired device name/ID, suspicious packet 5-tuple, volume,
+    threat classification, forensic reasoning, and mitigation recommendations.
+    """
+    from app.config import get_settings
+    s = get_settings()
+    token = bot_token or s.telegram_bot_token
+    chat_ids = chat_id_conf or s.telegram_chat_id
+
+    if not token or not chat_ids:
+        logger.debug("Telegram alerts not configured; skipping paired device packet risk alert")
+        return False
+
+    src = packet_info.get("src_ip", device_ip)
+    dst = packet_info.get("dst_ip", "")
+    sport = packet_info.get("src_port", 0)
+    dport = packet_info.get("dst_port", 0)
+    proto = packet_info.get("protocol", "TCP")
+    flow_sig = f"{src}:{sport}->{dst}:{dport}:{proto}"
+
+    dedup_key = ("paired_packet_risk", str(org_id), str(device_ip), flow_sig, str(attack_category).upper())
+    if dedup_key in _alerted:
+        return False
+
+    html_msg, plain_msg = _format_paired_device_packet_risk_alert(
+        device_ip=device_ip,
+        device_name=device_name or "Paired Endpoint",
+        device_id=device_id,
+        packet_info=packet_info,
+        risk_score=risk_score,
+        verdict=verdict,
+        attack_category=attack_category,
+        threat_details=threat_details,
+        forecast_progression=forecast_progression,
+        recommended_action=recommended_action,
+        observed_at=observed_at,
+    )
+
+    ok = _dispatch_alert(token, chat_ids, html_msg, plain_msg)
+    if ok:
+        _alerted.add(dedup_key)
+        logger.info(
+            "[Telegram Alert] High-risk packet alert sent for paired device %s (%s): %s",
+            device_ip,
+            device_name,
+            flow_sig,
+        )
+    return ok
+
+
 # — scan cycle —
 def _scan(db: Session, bot_token: str, chat_id_conf: str) -> None:
     """One scan tick: query open high/critical findings + endpoint findings + active threats,
@@ -490,6 +675,107 @@ def _scan_org(db: Session, org_id: str, bot_token: str, chat_id_conf: str, now: 
                 _alerted.add(key)
         except Exception:
             logger.exception("failed to alert threat %s", t.id)
+
+    # 4. Paired Device High-Risk Packet & Flow Alerts
+    try:
+        from app.models.endpoint import EndpointAgent
+        from app.services.traffic.session_manager import tracking_manager
+
+        paired_agents = db.scalars(
+            select(EndpointAgent).where(
+                EndpointAgent.org_id == org_id,
+                EndpointAgent.status.in_(["ONLINE", "PAIRED", "STALE"]),
+            )
+        ).all()
+
+        for agent in paired_agents:
+            dev_ip = (agent.current_ip or "").strip()
+            if not dev_ip:
+                continue
+
+            sess = (
+                tracking_manager.get_active_session_for_device(org_id, agent.device_id)
+                or tracking_manager.get_active_session_for_device(org_id, dev_ip)
+                or (tracking_manager.get_active_session_for_device(org_id, agent.agent_id) if agent.agent_id else None)
+            )
+
+            if not sess:
+                continue
+
+            det = getattr(sess, "last_detection", None)
+            if not det:
+                continue
+
+            verdict_str = getattr(det, "verdict", "NORMAL").upper()
+            risk_val = getattr(det, "risk_score", getattr(det, "confidence", 0.0))
+            cat = getattr(det, "attack_category", "SUSPICIOUS_TRAFFIC") or "SUSPICIOUS_TRAFFIC"
+
+            is_high_risk = (
+                verdict_str in ("ANOMALOUS", "SUSPICIOUS")
+                or (isinstance(risk_val, (int, float)) and risk_val >= 0.70)
+                or (str(cat).upper() not in ("BENIGN", "NORMAL", "UNKNOWN"))
+            )
+
+            if is_high_risk:
+                all_flows = sess.aggregator.get_all_flows() if hasattr(sess, "aggregator") else []
+                top_dest = sess.aggregator.get_top_destinations(limit=3) if hasattr(sess, "aggregator") else []
+
+                if all_flows:
+                    suspicious_packet = {
+                        "src_ip": getattr(all_flows[0], "src_ip", dev_ip),
+                        "dst_ip": getattr(all_flows[0], "dst_ip", "10.0.0.1"),
+                        "src_port": getattr(all_flows[0], "src_port", 0),
+                        "dst_port": getattr(all_flows[0], "dst_port", 0),
+                        "protocol": getattr(all_flows[0], "protocol", "TCP"),
+                        "packets": getattr(all_flows[0], "total_packets", 1),
+                        "bytes": getattr(all_flows[0], "total_bytes", 64),
+                        "summary": f"High risk {getattr(all_flows[0], 'protocol', 'TCP')} flow to {getattr(all_flows[0], 'dst_ip', '')}",
+                    }
+                elif top_dest:
+                    d = top_dest[0]
+                    suspicious_packet = {
+                        "src_ip": dev_ip,
+                        "dst_ip": d.get("destination_ip", "unknown"),
+                        "src_port": 0,
+                        "dst_port": d.get("destination_port", 0),
+                        "protocol": d.get("protocol", "TCP"),
+                        "packets": d.get("connection_count", 1),
+                        "bytes": d.get("connection_count", 1) * 64,
+                        "summary": f"Suspicious connection burst to {d.get('destination_ip')}:{d.get('destination_port')}",
+                    }
+                else:
+                    suspicious_packet = {
+                        "src_ip": dev_ip,
+                        "dst_ip": "Network Target",
+                        "src_port": 0,
+                        "dst_port": 0,
+                        "protocol": "TCP",
+                        "packets": getattr(sess.aggregator, "packet_count", 1) if hasattr(sess, "aggregator") else 1,
+                        "bytes": getattr(sess.aggregator, "byte_count", 64) if hasattr(sess, "aggregator") else 64,
+                        "summary": "Anomalous traffic pattern detected by neural temporal forecaster",
+                    }
+
+                fc = getattr(sess, "last_forecast", None)
+                prog_str = getattr(fc, "predicted_progression", None)
+
+                notify_paired_device_packet_risk(
+                    org_id=org_id,
+                    device_ip=dev_ip,
+                    packet_info=suspicious_packet,
+                    device_name=agent.hostname,
+                    device_id=agent.device_id,
+                    risk_score=float(risk_val) if risk_val else 0.85,
+                    verdict=verdict_str,
+                    attack_category=cat,
+                    threat_details=getattr(det, "details", "Neural sequence detector flagged abnormal packet traffic on paired endpoint."),
+                    forecast_progression=prog_str,
+                    recommended_action="Inspect running processes and restrict outbound network access from this paired device.",
+                    observed_at=now,
+                    bot_token=bot_token,
+                    chat_id_conf=chat_id_conf,
+                )
+    except Exception:
+        logger.exception("failed checking paired device packet risks for org %s", org_id)
 
 
 

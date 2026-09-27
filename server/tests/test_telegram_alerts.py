@@ -547,3 +547,317 @@ def test_scan_org_db_findings_with_service():
         assert len(dispatched) == 1
         assert "CVE-2023-1234" in dispatched[0]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paired Device High-Risk Packet Alerts Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_format_paired_device_packet_risk_alert():
+    """Verify high-risk packet alert on paired device formats all required fields accurately."""
+    from app.services.telegram_alerts import _format_paired_device_packet_risk_alert
+
+    pkt = {
+        "src_ip": "192.168.1.180",
+        "dst_ip": "192.168.1.250",
+        "src_port": 54321,
+        "dst_port": 445,
+        "protocol": "TCP",
+        "packets": 128,
+        "bytes": 8192,
+        "process_name": "powershell.exe",
+        "summary": "High volume SMB outbound sweep",
+    }
+
+    html_msg, plain_msg = _format_paired_device_packet_risk_alert(
+        device_ip="192.168.1.180",
+        device_name="WORKSTATION-01",
+        device_id="dev-7b605443",
+        packet_info=pkt,
+        risk_score=0.92,
+        verdict="ANOMALOUS",
+        attack_category="LATERAL_MOVEMENT",
+        threat_details="Neural temporal model flagged unusual outbound SMB session bursts.",
+        forecast_progression="LIKELY_ESCALATION",
+        recommended_action="Isolate host from internal subnet and inspect powershell process.",
+        observed_at=datetime(2026, 9, 27, 2, 45, 0, tzinfo=timezone.utc),
+    )
+
+    # 1. Device IP and Paired Identity
+    assert "192.168.1.180" in html_msg
+    assert "WORKSTATION-01" in html_msg
+    assert "dev-7b605443" in html_msg
+    assert "PAIRED &amp; AUTHENTICATED" in html_msg
+
+    # 2. Suspicious Packet Information
+    assert "54321 ➔ 192.168.1.250:445" in html_msg
+    assert "TCP" in html_msg
+    assert "128 packets" in html_msg
+    assert "powershell.exe" in html_msg
+    assert "High volume SMB outbound sweep" in html_msg
+
+    # 3. Risk details & recommendation
+    assert "LATERAL_MOVEMENT" in html_msg
+    assert "0.92" in html_msg
+    assert "LIKELY_ESCALATION" in html_msg
+    assert "Isolate host" in html_msg
+
+    # Plain text verification
+    assert "192.168.1.180" in plain_msg
+    assert "WORKSTATION-01" in plain_msg
+    assert "192.168.1.180:54321 -> 192.168.1.250:445" in plain_msg
+    assert "powershell.exe" in plain_msg
+
+
+def test_notify_paired_device_packet_risk_dispatch_and_deduplication():
+    """Verify notify_paired_device_packet_risk dispatches to Telegram and enforces deduplication."""
+    from app.services.telegram_alerts import notify_paired_device_packet_risk
+
+    pkt1 = {
+        "src_ip": "10.0.0.45",
+        "dst_ip": "10.0.0.1",
+        "src_port": 49152,
+        "dst_port": 22,
+        "protocol": "TCP",
+        "packets": 50,
+        "bytes": 3200,
+        "summary": "SSH brute force attempt",
+    }
+
+    dispatched = []
+
+    def fake_dispatch(bot_token, chat_id, html_text, plain_text):
+        dispatched.append(html_text)
+        return True
+
+    with patch("app.services.telegram_alerts._dispatch_alert", side_effect=fake_dispatch):
+        # 1st alert: must succeed and dispatch
+        ok1 = notify_paired_device_packet_risk(
+            org_id="org-test-1",
+            device_ip="10.0.0.45",
+            packet_info=pkt1,
+            device_name="SERVER-01",
+            device_id="dev-srv-01",
+            risk_score=0.88,
+            verdict="ANOMALOUS",
+            attack_category="BRUTE_FORCE",
+            threat_details="Multiple failed authentication packets in short time window",
+            bot_token="test-bot-token",
+            chat_id_conf="123456",
+        )
+        assert ok1 is True
+        assert len(dispatched) == 1
+        assert "10.0.0.45" in dispatched[0]
+        assert "SSH brute force attempt" in dispatched[0]
+
+        # 2nd call with identical packet: deduplication must suppress
+        ok2 = notify_paired_device_packet_risk(
+            org_id="org-test-1",
+            device_ip="10.0.0.45",
+            packet_info=pkt1,
+            device_name="SERVER-01",
+            device_id="dev-srv-01",
+            risk_score=0.88,
+            verdict="ANOMALOUS",
+            attack_category="BRUTE_FORCE",
+            threat_details="Multiple failed authentication packets in short time window",
+            bot_token="test-bot-token",
+            chat_id_conf="123456",
+        )
+        assert ok2 is False
+        assert len(dispatched) == 1
+
+        # 3rd call with different suspicious packet: must dispatch new alert
+        pkt2 = dict(pkt1, dst_port=3389, summary="RDP exploit attempt")
+        ok3 = notify_paired_device_packet_risk(
+            org_id="org-test-1",
+            device_ip="10.0.0.45",
+            packet_info=pkt2,
+            device_name="SERVER-01",
+            device_id="dev-srv-01",
+            risk_score=0.95,
+            verdict="ANOMALOUS",
+            attack_category="EXPLOIT_ATTEMPT",
+            threat_details="Suspicious RDP handshake packet",
+            bot_token="test-bot-token",
+            chat_id_conf="123456",
+        )
+        assert ok3 is True
+        assert len(dispatched) == 2
+        assert "RDP exploit attempt" in dispatched[1]
+
+
+def test_scan_org_paired_device_high_risk_packet_detection():
+    """Verify that _scan_org automatically detects high-risk packets on paired devices and alerts Telegram."""
+    from app.models.endpoint import EndpointAgent
+    from app.services.traffic.session_manager import tracking_manager
+
+    org_id = "org-paired-test"
+    paired_agent = EndpointAgent(
+        id=str(uuid.uuid4()),
+        org_id=org_id,
+        agent_id="agent-001",
+        device_id="dev-paired-001",
+        hostname="PAIRED-MACBOOK",
+        os="darwin",
+        os_version="15.0",
+        current_ip="192.168.1.120",
+        status="ONLINE",
+        agent_token_hash="dummy_hash",
+        paired_at=datetime.now(timezone.utc),
+        registered_at=datetime.now(timezone.utc),
+    )
+
+    mock_session = MagicMock()
+    mock_session.device_id = "dev-paired-001"
+    mock_session.target_ip = "192.168.1.120"
+    mock_session.has_endpoint_agent = True
+    mock_session.paired_at = datetime.now(timezone.utc)
+
+    # Set up high-risk detection on the paired session
+    mock_det = MagicMock()
+    mock_det.verdict = "ANOMALOUS"
+    mock_det.risk_score = 0.94
+    mock_det.confidence = 0.94
+    mock_det.attack_category = "PORT_SCAN"
+    mock_det.details = "Multi-port scan sequence flagged across TCP ports 20-1024"
+    mock_session.last_detection = mock_det
+
+    mock_fc = MagicMock()
+    mock_fc.predicted_progression = "LIKELY_ESCALATION"
+    mock_session.last_forecast = mock_fc
+
+    mock_flow = MagicMock()
+    mock_flow.src_ip = "192.168.1.120"
+    mock_flow.dst_ip = "192.168.1.1"
+    mock_flow.src_port = 50000
+    mock_flow.dst_port = 8080
+    mock_flow.protocol = "TCP"
+    mock_flow.total_packets = 250
+    mock_flow.total_bytes = 15000
+    mock_session.aggregator.get_all_flows.return_value = [mock_flow]
+    mock_session.aggregator.get_top_destinations.return_value = []
+
+    mock_db = MagicMock()
+
+    def mock_scalars(statement):
+        res = MagicMock()
+        stmt_str = str(statement).lower()
+        if "endpoint_agents" in stmt_str:
+            res.all.return_value = [paired_agent]
+        else:
+            res.all.return_value = []
+        return res
+
+    mock_db.scalars.side_effect = mock_scalars
+
+    dispatched = []
+
+    def fake_dispatch(bot_token, chat_id, html_text, plain_text):
+        dispatched.append(html_text)
+        return True
+
+    with patch("app.services.traffic.session_manager.tracking_manager.get_active_session_for_device", return_value=mock_session), \
+         patch("app.services.telegram_alerts._dispatch_alert", side_effect=fake_dispatch):
+        _scan_org(mock_db, org_id, "test-bot-token", "123456")
+        assert len(dispatched) == 1
+        assert "192.168.1.120" in dispatched[0]
+        assert "PAIRED-MACBOOK" in dispatched[0]
+        assert "PORT_SCAN" in dispatched[0]
+        assert "PAIRED &amp; AUTHENTICATED" in dispatched[0]
+
+
+def test_paired_device_website_threat_alert():
+    """Verify website URL analysis and high-risk website alert formatting for paired devices."""
+    from app.services.telegram_alerts import _format_paired_device_packet_risk_alert
+    from app.services.traffic.session_manager import ActiveTrackingSession
+
+    pkt = {
+        "src_ip": "192.168.1.75",
+        "dst_ip": "185.199.108.153",
+        "src_port": 51234,
+        "dst_port": 443,
+        "protocol": "TCP",
+        "packets": 4,
+        "bytes": 1024,
+        "process_name": "chrome.exe",
+        "website_url": "https://malicious-phishing-bank.com/login",
+        "destination_host": "malicious-phishing-bank.com",
+        "url_trust_score": 15.0,
+        "url_risk_band": "Dangerous",
+        "summary": "chrome.exe accessed dangerous website: https://malicious-phishing-bank.com/login",
+    }
+
+    html_msg, plain_msg = _format_paired_device_packet_risk_alert(
+        device_ip="192.168.1.75",
+        device_name="DESKTOP-WIN11",
+        device_id="dev-win-01",
+        packet_info=pkt,
+        risk_score=0.85,
+        verdict="ANOMALOUS",
+        attack_category="MALICIOUS_WEBSITE",
+        threat_details="URL Trust analyzer flagged credential harvesting and phishing heuristics.",
+        forecast_progression="Web Connection ➔ Malicious Payload Download / Phishing ➔ Host Compromise",
+        recommended_action="Block outbound access to malicious-phishing-bank.com and isolate host.",
+    )
+
+    # 1. Verify Device and App Context
+    assert "192.168.1.75" in html_msg
+    assert "DESKTOP-WIN11" in html_msg
+    assert "chrome.exe" in html_msg
+    assert "MALICIOUS_WEBSITE" in html_msg
+
+    # 2. Verify Target Website and URL Trust Score
+    assert "https://malicious-phishing-bank.com/login" in html_msg
+    assert "URL Trust Score:" in html_msg
+    assert "15.0/100" in html_msg
+    assert "Dangerous" in html_msg
+
+    # Plain text check
+    assert "https://malicious-phishing-bank.com/login" in plain_msg
+    assert "15.0/100 (Dangerous)" in plain_msg
+
+    # 3. Test ActiveTrackingSession._evaluate_website_url dispatch
+    session = ActiveTrackingSession(
+        session_id="sess-url-test",
+        org_id="org-test-url",
+        device_id="dev-win-01",
+        target_ip="192.168.1.75",
+        target_hostname="DESKTOP-WIN11",
+        has_endpoint_agent=True,
+    )
+
+    mock_analysis = MagicMock()
+    mock_analysis.url = "https://phishing-site.xyz"
+    mock_analysis.score = 20.0
+    mock_analysis.band = "Dangerous"
+    mock_analysis.ai_summary = "Punycode domain imitating financial institution."
+    mock_analysis.website = {"host": "phishing-site.xyz"}
+
+    mock_settings = MagicMock()
+    mock_settings.telegram_bot_token = "test-token"
+    mock_settings.telegram_chat_id = "123456"
+
+    dispatched = []
+    def fake_dispatch(bot_token, chat_id, html_text, plain_text):
+        dispatched.append(html_text)
+        return True
+
+    with patch("app.services.urltrust.analyzer.analyze", return_value=mock_analysis), \
+         patch("app.config.get_settings", return_value=mock_settings), \
+         patch("app.services.telegram_alerts._dispatch_alert", side_effect=fake_dispatch):
+        session._evaluate_website_url(
+            website_url="https://phishing-site.xyz",
+            destination_host="phishing-site.xyz",
+            process_name="curl.exe",
+            dst_ip="1.2.3.4",
+            dst_port=443,
+            src_port=52000,
+        )
+
+        assert len(dispatched) == 1
+        assert "phishing-site.xyz" in dispatched[0]
+        assert "curl.exe" in dispatched[0]
+        assert "MALICIOUS_WEBSITE" in dispatched[0]
+
+
+

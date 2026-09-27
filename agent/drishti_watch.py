@@ -1188,8 +1188,82 @@ def start_loopback_tab_server(port: int = 48124) -> None:
     _LOOPBACK_SERVER_STARTED = True
 
 
-def _collect_browser_history_tabs(max_tabs: int = 35) -> list[dict]:
-    """Extract recent browser visits from Arc, Chrome, Edge, and Brave history DBs."""
+def _is_browser_process_running(browser_name: str) -> bool:
+    """Check if the given browser process is actively running before reading tabs or history."""
+    if platform.system() == "Darwin":
+        p_names = {
+            "Arc": ["Arc"],
+            "Google Chrome": ["Google Chrome", "Chrome"],
+            "Microsoft Edge": ["Microsoft Edge", "msedge"],
+            "Brave": ["Brave Browser", "Brave"],
+            "Safari": ["Safari"],
+        }.get(browser_name, [browser_name])
+        for pn in p_names:
+            try:
+                res = subprocess.run(["pgrep", "-xi", pn], capture_output=True)
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
+    else:
+        try:
+            import psutil
+            for p in psutil.process_iter(["name"]):
+                pn = (p.info.get("name") or "").lower()
+                if browser_name.lower() in pn:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _collect_macos_live_browser_tabs() -> list[dict]:
+    """Retrieve actual live open tabs from running browsers via AppleScript on Darwin."""
+    from urllib.parse import urlparse
+    from datetime import datetime, timezone
+
+    tabs = []
+    seen = set()
+    browsers = ["Google Chrome", "Brave Browser", "Arc", "Microsoft Edge", "Safari"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for b in browsers:
+        if not _is_browser_process_running(b):
+            continue
+        try:
+            script = f'tell application "{b}" to get URL of every tab of every window'
+            out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=2).stdout
+            urls = [u.strip() for u in out.split(", ") if u.strip().startswith("http")]
+            for u in urls:
+                try:
+                    host = urlparse(u).netloc.split(":")[0].lower()
+                    if host.startswith("www."):
+                        host = host[4:]
+                    if not host or host in ("localhost", "127.0.0.1"):
+                        continue
+                    reg = registrable(host) or host
+                    if reg and reg not in seen:
+                        seen.add(reg)
+                        tabs.append({
+                            "name": f"{b}: {reg}",
+                            "evidence_type": "BROWSER_ACTIVE_TAB",
+                            "source": "browser_live_tabs",
+                            "observed_at": now_iso,
+                            "details": f"{b} Active Tab | {u}",
+                            "browser": b,
+                            "url": u,
+                            "domain": reg,
+                            "title": reg,
+                        })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return tabs
+
+
+def _collect_browser_history_tabs(max_tabs: int = 25) -> list[dict]:
+    """Extract recent browser visits from history DBs (only for running browsers within the last 5 minutes)."""
     import shutil
     import tempfile
     from urllib.parse import urlparse
@@ -1199,6 +1273,9 @@ def _collect_browser_history_tabs(max_tabs: int = 35) -> list[dict]:
     tabs = []
     seen_domains = set()
     epoch_start = datetime(1601, 1, 1, tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    # Strictly filter for visits in the last 300 seconds (5 minutes)
+    min_lvt = int((now_utc - epoch_start).total_seconds() - 300) * 1_000_000
 
     for db_path in dbs:
         p_str = str(db_path)
@@ -1208,11 +1285,14 @@ def _collect_browser_history_tabs(max_tabs: int = 35) -> list[dict]:
             else ("Microsoft Edge" if "Edge" in p_str
             else ("Brave" if "Brave" in p_str else "Browser")))
         )
+        # Skip browser if not currently running
+        if not _is_browser_process_running(bname):
+            continue
+
         tmpdir = Path(tempfile.mkdtemp(prefix="drishti_tabs_"))
         tmp_db = tmpdir / "History"
         try:
             shutil.copy2(db_path, tmp_db)
-            # copy journal/wal/shm if present
             for ext in ("-journal", "-wal", "-shm"):
                 sib = db_path.parent / (db_path.name + ext)
                 if sib.exists():
@@ -1222,7 +1302,7 @@ def _collect_browser_history_tabs(max_tabs: int = 35) -> list[dict]:
                         pass
             conn = sqlite3.connect(str(tmp_db), timeout=1.0)
             cur = conn.cursor()
-            cur.execute("SELECT url, title, last_visit_time FROM urls WHERE last_visit_time > 0 ORDER BY last_visit_time DESC LIMIT 100")
+            cur.execute("SELECT url, title, last_visit_time FROM urls WHERE last_visit_time >= ? ORDER BY last_visit_time DESC LIMIT 50", (min_lvt,))
             rows = cur.fetchall()
             conn.close()
 
@@ -1266,7 +1346,7 @@ def _collect_browser_history_tabs(max_tabs: int = 35) -> list[dict]:
 
 
 def _get_active_browser_tabs(ttl_seconds: float = 300.0) -> list[dict]:
-    """Retrieve non-stale active browser tabs received from extension and recent browser history."""
+    """Retrieve genuinely live active browser tabs from extension, OS automation, or recent sessions."""
     now = time.monotonic()
     active_tabs = []
     with _ACTIVE_TABS_LOCK:
@@ -1276,13 +1356,21 @@ def _get_active_browser_tabs(ttl_seconds: float = 300.0) -> list[dict]:
         for b, data in sorted(_ACTIVE_TABS_BY_BROWSER.items()):
             active_tabs.append(data["item"])
 
-    # Merge recent browser history tabs (Arc, Chrome, Edge, Brave) so Arc visits are displayed
     seen_domains = {t.get("domain") for t in active_tabs if t.get("domain")}
-    for ht in _collect_browser_history_tabs(max_tabs=20):
-        dom = ht.get("domain")
-        if dom and dom not in seen_domains:
-            seen_domains.add(dom)
-            active_tabs.append(ht)
+
+    # On macOS, query running browsers directly for their open tabs
+    if platform.system() == "Darwin":
+        for lt in _collect_macos_live_browser_tabs():
+            dom = lt.get("domain")
+            if dom and dom not in seen_domains:
+                seen_domains.add(dom)
+                active_tabs.append(lt)
+    else:
+        for ht in _collect_browser_history_tabs(max_tabs=20):
+            dom = ht.get("domain")
+            if dom and dom not in seen_domains:
+                seen_domains.add(dom)
+                active_tabs.append(ht)
 
     return active_tabs
 
@@ -2071,6 +2159,23 @@ def run_devices(server: str, token: str, source_host: str, interval: float,
                     devices.append({"ip": c["self_ip"], "mac": effective_self_mac,
                                     "hostname": source_host, "subnet": c["cidr"],
                                     "discovery": "arp"})
+                # make sure default gateway router is always maintained in the device list
+                if gw and ipaddress.ip_address(gw) in net and not any(d.get("ip") == gw for d in devices):
+                    gw_mac = None
+                    try:
+                        for ad in _arp_devices():
+                            if ad.get("ip") == gw and ad.get("mac"):
+                                gw_mac = ad["mac"]
+                                break
+                    except Exception:
+                        pass
+                    devices.append({
+                        "ip": gw,
+                        "mac": gw_mac or "",
+                        "hostname": "gateway",
+                        "subnet": c["cidr"],
+                        "discovery": "arp",
+                    })
             else:
                 devices = _scan_off_link(net)
             data = _post_json(server, token, "/api/live/devices", {

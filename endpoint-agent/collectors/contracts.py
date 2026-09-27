@@ -88,6 +88,8 @@ class SocketConnectionItem:
     remote_address: str
     remote_port: int
     state: str  # ESTABLISHED, SYN_SENT, TIME_WAIT, etc.
+    destination_host: str | None = None
+    website_url: str | None = None
     observed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     source: str = "endpoint_sockets"
 

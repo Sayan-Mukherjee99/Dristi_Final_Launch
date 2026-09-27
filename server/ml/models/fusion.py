@@ -28,7 +28,7 @@ class FusionDetector(nn.Module):
         fused_dim = temporal_dim + graph_dim
         self.fusion_mlp = nn.Sequential(
             nn.Linear(fused_dim, 96),
-            nn.BatchNorm1d(96),
+            nn.LayerNorm(96),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(96, 48),

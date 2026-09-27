@@ -956,6 +956,14 @@ def observe_devices(db: Session, org_id: str, batch: DeviceBatch) -> DeviceBatch
         for row in stale:
             if row.id in seen_ids:
                 continue
+            last_t = _aware(row.last_seen)
+            # Never kill sessions or mark devices offline for transient single-sweep misses.
+            # A device is only stale/offline if not observed for > MAX_OBSERVATION_GAP (5m).
+            if last_t and (now - last_t) <= MAX_OBSERVATION_GAP:
+                continue
+            # A gateway router on an active subnet with online hosts is continuously present
+            if row.is_gateway:
+                continue
             _close_device_session(db, org_id, row)
             if row.ip in online_ips:
                 # stale duplicate of an IP that answered under another identity
@@ -1462,19 +1470,8 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
             rj = ds.result_json or {}
             raw_ports = rj.get("ports") or []
             dev_open_ports = [int(p) for p in raw_ports if isinstance(p, (int, float))]
-            raw_services = rj.get("services") or []
-            for s in raw_services:
-                if isinstance(s, dict):
-                    dev_services.append(DeepScanService(
-                        port=int(s.get("port", 0)),
-                        protocol=str(s.get("protocol", "tcp")),
-                        service_name=str(s.get("service_name", "unknown")),
-                        product=s.get("product"),
-                        version=s.get("version"),
-                        cpe=s.get("cpe"),
-                        banner=s.get("banner"),
-                        confidence=s.get("confidence"),
-                    ))
+            from app.services.deepscan.remediation import enrich_service_port
+
             raw_cves = rj.get("cves") or []
             for c in raw_cves:
                 if isinstance(c, dict):
@@ -1485,6 +1482,32 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
                         summary=str(c.get("summary", "")),
                         affected_service=str(c.get("affected_service", "")),
                         finding_id=c.get("finding_id"),
+                    ))
+
+            raw_services = rj.get("services") or []
+            for s in raw_services:
+                if isinstance(s, dict):
+                    enriched_s = enrich_service_port(s, raw_cves)
+                    matching_cve_objs = [
+                        c_obj for c_obj in dev_cves
+                        if c_obj.id in enriched_s.get("cve_ids", [])
+                    ]
+                    dev_services.append(DeepScanService(
+                        port=int(enriched_s.get("port", 0)),
+                        protocol=str(enriched_s.get("protocol", "tcp")),
+                        service_name=str(enriched_s.get("service_name", "unknown")),
+                        product=enriched_s.get("product"),
+                        version=enriched_s.get("version"),
+                        cpe=enriched_s.get("cpe"),
+                        banner=enriched_s.get("banner"),
+                        confidence=enriched_s.get("confidence"),
+                        vulnerability_score=float(enriched_s.get("vulnerability_score", 0.0)),
+                        severity=str(enriched_s.get("severity", "secure")),
+                        finding_state=str(enriched_s.get("finding_state", "SECURE")),
+                        cve_ids=enriched_s.get("cve_ids", []),
+                        cves=matching_cve_objs,
+                        solution=enriched_s.get("solution"),
+                        remediation_steps=enriched_s.get("remediation_steps", []),
                     ))
             dev_os_from_scan = rj.get("os")
             raw_risk = rj.get("risk_score")
@@ -1760,10 +1783,18 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
         # Only populated when a LIVE tracking session exists — never cross-device.
         # Labels: CURRENT DETECTION and FORECAST — NOT confirmed attack status.
         from app.services.traffic.session_manager import session_manager as _sm
-        ep_dev_id_for_ai = endpoint_agent_row.device_id if (endpoint_agent_row and matched_host_telem) else None
         ai_session = None
-        if ep_dev_id_for_ai:
-            ai_session = _sm.get_active_session_for_device(org_id, ep_dev_id_for_ai)
+        candidate_ids = [r.id]
+        if endpoint_agent_row:
+            if endpoint_agent_row.device_id:
+                candidate_ids.append(endpoint_agent_row.device_id)
+            if endpoint_agent_row.agent_id:
+                candidate_ids.append(endpoint_agent_row.agent_id)
+        for cand_id in candidate_ids:
+            ai_session = _sm.get_active_session_for_device(org_id, cand_id)
+            if ai_session:
+                break
+
         dev_ai_detection = ai_session.last_detection if ai_session else None
         dev_ai_forecast = ai_session.last_forecast if ai_session else None
         dev_ai_tracking_active = ai_session is not None
@@ -1796,7 +1827,7 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
             matches = (
                 _hosts_match(h_host, r.ip)
                 or (r.hostname and _hosts_match(h_host, r.hostname))
-                or (r.is_self and h_host in ("manual", "localhost", "127.0.0.1", "default", ""))
+                or (r.is_self and h_host in ("manual", "localhost", "127.0.0.1"))
             )
             if not matches:
                 continue
@@ -1816,7 +1847,7 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
             matches = (
                 _hosts_match(sh, r.ip)
                 or (r.hostname and _hosts_match(sh, r.hostname))
-                or (r.is_self and sh in ("manual", "localhost", "127.0.0.1", ""))
+                or (r.is_self and sh in ("manual", "localhost", "127.0.0.1"))
             )
             if matches and obs.domain:
                 dom_clean = _clean_domain(obs.domain)
@@ -1948,11 +1979,29 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
                     completed_duration += max(0.0, (end_t - st_t).total_seconds())
 
         if r.online and current_session is not None:
-            c_st = _aware(current_session.started_at)
-            current_session_started_at = current_session.started_at
+            # Reconstruct true continuous session started_at across any fragmented observation gaps <= MAX_OBSERVATION_GAP
+            effective_started_at = current_session.started_at
+            sorted_sessions = sorted(
+                dev_sessions,
+                key=lambda s: _aware(s.started_at) or datetime.min.replace(tzinfo=timezone.utc),
+            )
+            curr_idx = sorted_sessions.index(current_session) if current_session in sorted_sessions else len(sorted_sessions) - 1
+            ref_start = _aware(current_session.started_at)
+            for idx in range(curr_idx - 1, -1, -1):
+                prev_s = sorted_sessions[idx]
+                prev_end = _aware(prev_s.ended_at or prev_s.last_seen)
+                prev_st = _aware(prev_s.started_at)
+                if prev_end and ref_start and (ref_start - prev_end) <= MAX_OBSERVATION_GAP:
+                    ref_start = prev_st
+                    effective_started_at = prev_s.started_at
+                else:
+                    break
+
+            c_st = _aware(effective_started_at)
+            current_session_started_at = effective_started_at
             obs_source = current_session.observation_source or r.discovery or "arp"
 
-            if current_session.observation_count <= 1 or not c_st:
+            if (current_session.observation_count <= 1 and effective_started_at == current_session.started_at) or not c_st:
                 current_session_duration = 0.0
                 presence_state = "new"
             else:
@@ -1967,6 +2016,23 @@ def list_devices(db: Session, org_id: str) -> list[NetworkDeviceOut]:
             presence_state = "offline" if not r.online else "new"
             total_observed_duration = completed_duration
             obs_source = dev_sessions[-1].observation_source if dev_sessions else (r.discovery or "arp")
+
+        # Network invariant: The default gateway router of a subnet has been present at least as long
+        # as any host connected through it on the same subnet
+        if r.is_gateway:
+            for other in rows:
+                if other.id != r.id and other.online and (other.subnet == r.subnet or other.is_self):
+                    o_dev_key = _device_identity_key(other.mac, other.subnet, other.ip)
+                    o_sessions = sessions_by_key.get((other.subnet or "default", o_dev_key), [])
+                    o_curr = next((s for s in reversed(o_sessions) if s.is_current), None)
+                    if o_curr and o_curr.started_at:
+                        o_st = _aware(o_curr.started_at)
+                        if o_st:
+                            o_dur = max(0.0, (_aware(now_time) - o_st).total_seconds())
+                            if o_dur > current_session_duration:
+                                current_session_duration = o_dur
+                                current_session_started_at = o_curr.started_at
+                                presence_state = "continuous"
 
         dev_ladder_state: str | None = None
         if any(c.in_kev for c in dev_cves):

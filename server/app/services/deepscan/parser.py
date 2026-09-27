@@ -75,13 +75,14 @@ def _parse_host(host: ET.Element) -> dict:
 
 
 def parse_nmap_xml(xml_text: str) -> dict:
-    """Single-host convenience: {up, os, services}. Raises ValueError on bad XML."""
+    """Single-host convenience: {up, os, services, timed_out}. Raises ValueError on bad XML."""
     root = _root(xml_text)
     host = root.find("host")
     if host is None:
-        return {"up": False, "os": None, "services": []}
+        return {"up": False, "os": None, "services": [], "timed_out": False}
     parsed = _parse_host(host)
-    return {"up": parsed["up"], "os": parsed["os"], "services": parsed["services"]}
+    timed_out = host.get("timedout") == "true"
+    return {"up": parsed["up"], "os": parsed["os"], "services": parsed["services"], "timed_out": timed_out}
 
 
 def parse_hosts(xml_text: str) -> list[dict]:

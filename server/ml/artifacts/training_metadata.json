@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-19T09:52:32.245680+00:00",
+  "timestamp": "2026-09-26T19:01:04.178035+00:00",
   "canonical_features": [
     "flow_duration",
     "total_fwd_packets",
@@ -61,8 +61,8 @@
       "f1": 0.8181
     },
     "fusion": {
-      "accuracy": 0.749,
-      "f1": 0.6458
+      "accuracy": 0.751,
+      "f1": 0.6442
     }
   },
   "artifacts": {

@@ -126,14 +126,55 @@ class NetworkGraphEngine:
 
         # Degree normalization: D^(-0.5) * A * D^(-0.5)
         deg = np.sum(adj, axis=1)
-        deg_inv_sqrt = np.power(deg, -0.5, where=deg > 0)
-        deg_inv_sqrt[deg == 0] = 0.0
+        deg_inv_sqrt = np.power(deg, -0.5, where=deg > 0, out=np.zeros_like(deg))
         d_mat = np.diag(deg_inv_sqrt)
         norm_adj = d_mat @ adj @ d_mat
 
         if torch is None:
             return x, norm_adj
         return torch.tensor(x, dtype=torch.float32), torch.tensor(norm_adj, dtype=torch.float32)
+
+    def get_sparse_graph_tensors(self) -> tuple[Any, Any]:
+        """Convert graph into PyTorch (node_features, edge_index) sparse tensors.
+
+        node_features shape: [N, 4] -> [is_target, log(packets+1), log(bytes+1), degree]
+        edge_index shape: [2, E] (undirected edges)
+        """
+        nodes = list(self.graph.nodes())
+        n = max(1, len(nodes))
+        node_idx = {node: i for i, node in enumerate(nodes)}
+
+        # Node features: 4-dim
+        x = np.zeros((n, 4), dtype=np.float32)
+        for i, node in enumerate(nodes):
+            data = self.graph.nodes[node]
+            pkts = float(data.get("packet_count", 0))
+            bytes_val = float(data.get("byte_count", 0))
+            degree = float(self.graph.degree(node))
+            is_target = 1.0 if data.get("is_target") else 0.0
+            x[i] = [
+                is_target,
+                np.log1p(pkts),
+                np.log1p(bytes_val),
+                degree,
+            ]
+
+        # Sparse edge index [2, E]
+        edges_src = []
+        edges_dst = []
+        for u, v in self.graph.edges():
+            i, j = node_idx[u], node_idx[v]
+            edges_src.extend([i, j])
+            edges_dst.extend([j, i])
+
+        if not edges_src:
+            edge_index = np.zeros((2, 0), dtype=np.int64)
+        else:
+            edge_index = np.array([edges_src, edges_dst], dtype=np.int64)
+
+        if torch is None:
+            return x, edge_index
+        return torch.tensor(x, dtype=torch.float32), torch.tensor(edge_index, dtype=torch.long)
 
     def to_dict(self) -> dict[str, Any]:
         """Returns JSON-serializable graph structure for UI or telemetry."""

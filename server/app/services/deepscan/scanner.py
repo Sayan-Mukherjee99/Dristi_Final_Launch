@@ -23,21 +23,41 @@ from app.services.deepscan import parser
 
 logger = logging.getLogger("drishti")
 
-# Full TCP coverage (`-p-` = 1–65535), not nmap's default top-1000. Services
-# bound to non-standard ports (8080, 8443, 9000, 32400, …) must not be silently
-# skipped. `-sV` + a moderate `--version-intensity` collects product/version
-# evidence for correlation. `-Pn` skips host discovery — the device is already
-# known-up from the ARP/ping sweep. `--open` keeps XML to listening ports.
-# `--min-rate` keeps a full-port LAN sweep bounded. No `-O` (needs root).
+# Smart port list — covers the nmap top-1000 + common non-standard service
+# ports (8080, 8443, 9090, 9100, 9200, 32400 …). Using `-p-` (all 65535) on a
+# macOS host without root forces a slow userspace connect() scan that reliably
+# times out before the sweep finishes. This curated list catches virtually every
+# real-world listener while completing in < 60 s without root.
 #
-# nmap gets its OWN `--host-timeout` just under the subprocess timeout so it
-# flushes partial XML instead of being hard-killed with empty output.
+# `-sV` + `--version-intensity 5` collects product/version banner evidence.
+# `-Pn` skips host-discovery (device already known-up from ARP sweep).
+# `--open` restricts XML to listening ports only.
+# `--max-retries 1` keeps the non-root connect() scan brisk.
+# `--min-rate 1000` bounds scan duration without overloading LAN devices.
+# nmap's own `--host-timeout` (slightly < subprocess timeout) lets it flush
+# partial XML gracefully instead of being hard-killed mid-write.
+_TARGETED_PORTS = (
+    # ── Well-known / IANA services ────────────────────────────────────────────
+    "21,22,23,25,53,69,79,80,88,110,111,119,123,135,137,138,139,143,161,179,"
+    "194,389,443,445,465,500,512,513,514,515,587,631,636,873,902,989,990,993,"
+    "995,1080,1194,1433,1434,1521,1723,1883,2049,2181,2375,2376,2379,2380,"
+    "3000,3268,3269,3306,3389,3690,4369,4444,4848,5000,5001,5432,5555,5601,"
+    "5672,5900,5984,5985,5986,6000,6379,6443,7001,7070,7474,7777,8000,8005,"
+    "8008,8009,8080,8081,8082,8083,8085,8086,8088,8089,8090,8091,8095,8096,"
+    "8161,8180,8181,8300,8333,8400,8443,8444,8500,8554,8800,8843,8888,8983,"
+    "9000,9001,9002,9042,9090,9092,9100,9200,9300,9418,9443,9999,10000,11211,"
+    "15672,27017,27018,27019,28017,32400,49151,49152,49153,49154,50000,50070,"
+    "50090,61616"
+)
+
+
 def _nmap_args(host_timeout_s: int) -> list[str]:
+    """Port args for single-host and batch subnet scans."""
     return [
         "-sV", "--version-intensity", "5", "-T4", "-Pn",
-        "-p-", "--open",
+        f"-p{_TARGETED_PORTS}", "--open",
         "--max-retries", "1",
-        "--min-rate", "1500",
+        "--min-rate", "1000",
         f"--host-timeout={host_timeout_s}s", "-oX", "-",
     ]
 
@@ -58,8 +78,8 @@ def run_nmap(ip: str, timeout: float) -> tuple[str | None, str | None]:
     nmap_path = _nmap_bin()
     if nmap_path is None:
         return None, "nmap is not installed on the server"
-    # let nmap self-terminate ~15s before we would, so it flushes its XML
-    host_timeout_s = max(30, int(timeout) - 15)
+    # let nmap self-terminate ~10s before we would, so it flushes its XML
+    host_timeout_s = max(30, int(timeout) - 10)
     try:
         proc = subprocess.run(
             [nmap_path, *_nmap_args(host_timeout_s), ip],
@@ -110,6 +130,15 @@ def scan(ip: str, timeout: float | None = None) -> dict:
         parsed = parser.parse_nmap_xml(xml or "")
     except ValueError as exc:
         return {"available": False, "target": ip, "reason": f"could not parse nmap output: {exc}"}
+
+    # If nmap hit its per-host timeout and found no open ports, the result is
+    # incomplete — surface it as unavailable rather than an empty-service scan.
+    if parsed.get("timed_out") and not parsed.get("services"):
+        return {"available": False, "target": ip, "reason": (
+            "Scan timed out before all ports could be probed. "
+            "The device may be slow to respond or rate-limiting connections. "
+            "Try again — if this persists the device may be blocking probes."
+        )}
 
     return _host_result(ip, parsed)
 

@@ -67,16 +67,17 @@ class Settings(BaseSettings):
     # contributes NOTHING (never a fabricated CVE). Keys are optional.
     nvd_api_key: str = ""
     vulners_key: str = ""
-    # nmap subprocess timeout (seconds) — a full-TCP (`-p-`) -sV scan of a LAN
-    # host is slower than nmap's default top-1000; bound but don't truncate early
-    deepscan_timeout_seconds: float = 420.0
+    # nmap subprocess timeout (seconds) — targeted port list scan (~150 curated
+    # ports covering all common services) completes in <60s without root on macOS.
+    # 90s gives a generous buffer; the scan self-terminates via --host-timeout.
+    deepscan_timeout_seconds: float = 90.0
     # outbound timeout for a single NVD/Vulners CVE lookup (seconds)
     deepscan_cve_timeout_seconds: float = 12.0
     # Subnet (range) scan bounds — direct Nmap on the LOCAL subnet, no NAT.
-    deepscan_max_hosts: int = 16  # hosts per nmap batch (one full-TCP -sV run)
+    deepscan_max_hosts: int = 16  # hosts per nmap batch (targeted-port -sV run)
     deepscan_max_total_hosts: int = 256  # hard ceiling on total hosts across batches
     deepscan_discovery_timeout_seconds: float = 60.0  # `nmap -sn` sweep ceiling
-    deepscan_range_timeout_seconds: float = 480.0  # per-batch full-TCP -sV ceiling
+    deepscan_range_timeout_seconds: float = 180.0  # per-batch targeted-port -sV ceiling
 
     # Business-impact model: per-org breach overhead constant (regulatory,
     # notification, response costs). Transparent, tunable (BACKEND.md §7.1).

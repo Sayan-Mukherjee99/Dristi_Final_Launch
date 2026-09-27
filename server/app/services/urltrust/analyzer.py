@@ -199,7 +199,7 @@ def _signal_out(s: Signal) -> dict:
     }
 
 
-def analyze(db: Session, org_id: str, raw_url: str) -> UrlAnalysisResult:
+def analyze(db: Session | None, org_id: str, raw_url: str) -> UrlAnalysisResult:
     url, parts, inferred = normalize_url(raw_url)
     host = parts.hostname or ""
     
@@ -272,15 +272,19 @@ def analyze(db: Session, org_id: str, raw_url: str) -> UrlAnalysisResult:
         disclaimer=DISCLAIMER,
     )
 
-    row = UrlAnalysis(
-        org_id=org_id,
-        url=url,
-        score=score,
-        band=band,
-        result_json=result.model_dump(mode="json"),
-    )
-    db.add(row)
-    db.commit()
+    if db is not None:
+        try:
+            row = UrlAnalysis(
+                org_id=org_id,
+                url=url,
+                score=score,
+                band=band,
+                result_json=result.model_dump(mode="json"),
+            )
+            db.add(row)
+            db.commit()
+        except Exception:
+            pass
     return result
 
 

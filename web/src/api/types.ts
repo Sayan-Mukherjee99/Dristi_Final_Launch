@@ -538,6 +538,16 @@ export interface DeepScanService {
   service_name: string;
   product: string | null;
   version: string | null;
+  cpe?: string | null;
+  banner?: string | null;
+  confidence?: number | null;
+  vulnerability_score?: number;
+  severity?: "critical" | "high" | "medium" | "low" | "secure" | string;
+  finding_state?: "VULNERABLE" | "EXPOSED" | "SECURE" | string;
+  cve_ids?: string[];
+  cves?: DeepScanCve[];
+  solution?: string | null;
+  remediation_steps?: string[];
 }
 export interface DeepScanCve {
   id: string;
@@ -808,6 +818,26 @@ export interface ForecastResult {
   model_used: string;
 }
 
+export interface FlaggedPacket {
+  id: string;
+  timestamp: string;
+  src_ip: string;
+  src_port: number;
+  dst_ip: string;
+  dst_port: number;
+  protocol: string;
+  length: number;
+  tcp_flags?: string | null;
+  severity: "critical" | "high" | "medium" | "low" | "benign";
+  verdict: "HARMFUL" | "SUSPICIOUS" | "NORMAL";
+  threat_type: string;
+  reason: string;
+  mitre_ref?: string | null;
+  payload_preview?: string | null;
+  is_harmful: boolean;
+  remediation_hint?: string | null;
+}
+
 export interface TrackingResults {
   session: TrackingSession;
   metrics: LiveTrafficMetrics;
@@ -825,6 +855,10 @@ export interface TrackingResults {
     edges: Array<{ source: string; target: string; packet_count: number; byte_count: number; protocol: number }>;
   } | null;
   forecast?: ForecastResult | null;
+  flagged_packets?: FlaggedPacket[];
+  harmful_packet_count?: number;
+  suspicious_packet_count?: number;
+  normal_packet_count?: number;
 }
 
 // ---- Endpoint Agent Foundation (Phase 01) ----

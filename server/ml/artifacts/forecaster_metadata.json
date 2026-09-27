@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-19T14:59:52.178725+00:00",
+  "timestamp": "2026-09-26T19:00:56.458621+00:00",
   "horizon": 3,
   "classes": [
     "NORMAL_CONTINUATION",
@@ -42,35 +42,35 @@
     "lstm_forecaster": {
       "checkpoint": "lstm_forecaster.pt",
       "metrics": {
-        "overall_accuracy": 0.6305,
-        "overall_macro_f1": 0.18,
+        "overall_accuracy": 0.5961,
+        "overall_macro_f1": 0.2055,
         "horizon_steps": {
           "T+1": {
-            "accuracy": 0.6377,
-            "macro_f1": 0.1947,
-            "weighted_f1": 0.7788,
-            "precision": 1.0,
-            "recall": 0.6377,
-            "calibration_error": 0.1628,
+            "accuracy": 0.5955,
+            "macro_f1": 0.2067,
+            "weighted_f1": 0.4743,
+            "precision": 0.4821,
+            "recall": 0.5955,
+            "calibration_error": 0.1695,
             "confusion_matrix": [
               [
-                382,
+                700,
+                26,
+                3,
                 0,
-                184,
-                9,
-                24
+                1
               ],
               [
-                0,
-                0,
+                348,
+                13,
                 0,
                 0,
                 0
               ],
               [
-                0,
-                0,
-                0,
+                102,
+                5,
+                1,
                 0,
                 0
               ],
@@ -91,31 +91,31 @@
             ]
           },
           "T+2": {
-            "accuracy": 0.596,
-            "macro_f1": 0.1867,
-            "weighted_f1": 0.7469,
-            "precision": 1.0,
-            "recall": 0.596,
-            "calibration_error": 0.122,
+            "accuracy": 0.5997,
+            "macro_f1": 0.2051,
+            "weighted_f1": 0.4704,
+            "precision": 0.4911,
+            "recall": 0.5997,
+            "calibration_error": 0.1572,
             "confusion_matrix": [
               [
-                357,
-                0,
-                225,
-                13,
-                4
-              ],
-              [
-                0,
-                0,
-                0,
+                710,
+                19,
+                2,
                 0,
                 0
               ],
               [
+                353,
+                7,
                 0,
                 0,
-                0,
+                1
+              ],
+              [
+                103,
+                2,
+                2,
                 0,
                 0
               ],
@@ -136,31 +136,31 @@
             ]
           },
           "T+3": {
-            "accuracy": 0.6578,
-            "macro_f1": 0.1587,
-            "weighted_f1": 0.7936,
-            "precision": 1.0,
-            "recall": 0.6578,
-            "calibration_error": 0.1833,
+            "accuracy": 0.593,
+            "macro_f1": 0.2048,
+            "weighted_f1": 0.4683,
+            "precision": 0.4704,
+            "recall": 0.593,
+            "calibration_error": 0.1609,
             "confusion_matrix": [
               [
-                394,
-                4,
-                187,
-                12,
-                2
+                701,
+                26,
+                3,
+                0,
+                1
               ],
               [
-                0,
-                0,
+                354,
+                8,
                 0,
                 0,
                 0
               ],
               [
-                0,
-                0,
-                0,
+                101,
+                3,
+                2,
                 0,
                 0
               ],
@@ -186,33 +186,33 @@
     "transformer_forecaster": {
       "checkpoint": "transformer_forecaster.pt",
       "metrics": {
-        "overall_accuracy": 0.9266,
-        "overall_macro_f1": 0.4809,
+        "overall_accuracy": 0.608,
+        "overall_macro_f1": 0.2521,
         "horizon_steps": {
           "T+1": {
-            "accuracy": 0.9316,
-            "macro_f1": 0.4823,
-            "weighted_f1": 0.9646,
-            "precision": 1.0,
-            "recall": 0.9316,
-            "calibration_error": 0.0024,
+            "accuracy": 0.6055,
+            "macro_f1": 0.2514,
+            "weighted_f1": 0.4592,
+            "precision": 0.3699,
+            "recall": 0.6055,
+            "calibration_error": 0.1261,
             "confusion_matrix": [
               [
-                558,
+                726,
                 0,
-                41,
-                0,
-                0
-              ],
-              [
-                0,
-                0,
-                0,
+                4,
                 0,
                 0
               ],
               [
+                361,
                 0,
+                0,
+                0,
+                0
+              ],
+              [
+                108,
                 0,
                 0,
                 0,
@@ -235,29 +235,29 @@
             ]
           },
           "T+2": {
-            "accuracy": 0.9182,
-            "macro_f1": 0.4787,
-            "weighted_f1": 0.9574,
-            "precision": 1.0,
-            "recall": 0.9182,
-            "calibration_error": 0.0139,
+            "accuracy": 0.6097,
+            "macro_f1": 0.2525,
+            "weighted_f1": 0.4618,
+            "precision": 0.3717,
+            "recall": 0.6097,
+            "calibration_error": 0.0982,
             "confusion_matrix": [
               [
-                550,
-                0,
-                49,
-                0,
-                0
-              ],
-              [
-                0,
+                731,
                 0,
                 0,
                 0,
                 0
               ],
               [
+                361,
                 0,
+                0,
+                0,
+                0
+              ],
+              [
+                107,
                 0,
                 0,
                 0,
@@ -280,29 +280,29 @@
             ]
           },
           "T+3": {
-            "accuracy": 0.9299,
-            "macro_f1": 0.4818,
-            "weighted_f1": 0.9637,
-            "precision": 1.0,
-            "recall": 0.9299,
-            "calibration_error": 0.0552,
+            "accuracy": 0.6088,
+            "macro_f1": 0.2524,
+            "weighted_f1": 0.4617,
+            "precision": 0.3718,
+            "recall": 0.6088,
+            "calibration_error": 0.1624,
             "confusion_matrix": [
               [
-                557,
+                730,
                 0,
-                42,
-                0,
-                0
-              ],
-              [
-                0,
-                0,
-                0,
+                1,
                 0,
                 0
               ],
               [
+                361,
                 0,
+                1,
+                0,
+                0
+              ],
+              [
+                106,
                 0,
                 0,
                 0,

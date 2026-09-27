@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Drishti v0.1 — live network watch schemas | 11-Jul-2026
 """Request/response schemas for the live network watch (agent observes a domain
 → real trust verdict → live threat node → AI block recommendation)."""
@@ -58,7 +60,7 @@ class ActivityItem(BaseModel):
 
 class DeepScanService(BaseModel):
     port: int
-    protocol: str  # tcp | udp
+    protocol: str = "tcp"  # tcp | udp
     service_name: str
     product: str | None = None
     version: str | None = None
@@ -71,6 +73,13 @@ class DeepScanService(BaseModel):
     source: str = "nmap"
     is_stale: bool = False
     is_inferred: bool = False
+    vulnerability_score: float = 0.0
+    severity: str = "secure"  # critical | high | medium | low | secure
+    finding_state: str = "SECURE"  # VULNERABLE | EXPOSED | SECURE
+    cve_ids: list[str] = Field(default_factory=list)
+    cves: list[DeepScanCve] = Field(default_factory=list)
+    solution: str | None = None
+    remediation_steps: list[str] = Field(default_factory=list)
 
 
 class HttpEndpoint(BaseModel):

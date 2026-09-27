@@ -19,6 +19,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from ml.forecasting.classes import (
@@ -210,6 +211,64 @@ def evaluate_forecaster_multistep(
     }
 
 
+class FocalLoss(nn.Module):
+    """Multi-Class Focal Loss for mitigating extreme class imbalance in sequence forecasting.
+
+    loss = -alpha * ((1.0 - pt) ** gamma) * log(pt)
+    """
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        alpha: torch.Tensor | list[float] | None = None,
+        reduction: str = "mean",
+    ) -> None:
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        if alpha is not None:
+            if not isinstance(alpha, torch.Tensor):
+                alpha = torch.tensor(alpha, dtype=torch.float32)
+            self.register_buffer("alpha", alpha)
+        else:
+            self.alpha = None
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # logits: [N, num_classes], targets: [N]
+        ce_loss = F.cross_entropy(logits, targets, reduction="none")
+        pt = torch.exp(-ce_loss)
+        focal_term = (1.0 - pt) ** self.gamma
+        if self.alpha is not None:
+            alpha = self.alpha.to(logits.device)
+            alpha_t = alpha[targets]
+            loss = alpha_t * focal_term * ce_loss
+        else:
+            loss = focal_term * ce_loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+
+def compute_inverse_frequency_weights(y: np.ndarray, num_classes: int = 5) -> torch.Tensor:
+    """Computes inverse-frequency class-weight vector for alpha across behavioral classes."""
+    flat_y = y.flatten()
+    class_counts = np.bincount(flat_y, minlength=num_classes)
+    total_samples = len(flat_y)
+
+    weights = np.zeros(num_classes, dtype=np.float32)
+    for c in range(num_classes):
+        if class_counts[c] > 0:
+            weights[c] = total_samples / (num_classes * class_counts[c])
+        else:
+            weights[c] = 1.0
+
+    weights = weights / np.mean(weights)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def train_temporal_forecaster(
     model: nn.Module,
     X_train: np.ndarray,
@@ -220,12 +279,18 @@ def train_temporal_forecaster(
     batch_size: int = 32,
     lr: float = 0.001,
     weight_decay: float = 1e-4,
+    gamma: float = 2.0,
+    class_weights: torch.Tensor | None = None,
     device: str = "cpu",
 ) -> nn.Module:
-    """Trains a multi-step sequence forecaster using Multi-Task Cross-Entropy Loss."""
+    """Trains a multi-step sequence forecaster using Multi-Class Focal Loss."""
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    
+    if class_weights is None:
+        class_weights = compute_inverse_frequency_weights(y_train, num_classes=5)
+
+    criterion = FocalLoss(gamma=gamma, alpha=class_weights.to(device))
 
     train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long))
     val_ds = TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long))
@@ -243,7 +308,7 @@ def train_temporal_forecaster(
             optimizer.zero_grad()
             logits, _ = model(bx)  # [B, horizon, num_classes]
 
-            # Sum cross entropy loss across horizon steps
+            # Sum focal loss across horizon steps
             loss = 0.0
             for h in range(logits.size(1)):
                 loss = loss + criterion(logits[:, h, :], by[:, h])
@@ -309,13 +374,17 @@ def main() -> None:
         X, y, train_ratio=0.70, val_ratio=0.15, buffer_gap=seq_len + horizon
     )
 
+    class_weights = compute_inverse_frequency_weights(y_train, num_classes=5)
+    logger.info("Computed inverse-frequency class weights for Focal Loss: %s", class_weights.tolist())
+
     # 5. Train LSTM Forecaster
     logger.info("--- Training LSTM Forecaster ---")
     lstm_forecaster = LSTMForecaster(
         input_dim=27, hidden_dim=64, num_layers=2, horizon=horizon, num_classes=5
     )
     lstm_forecaster = train_temporal_forecaster(
-        lstm_forecaster, X_train, y_train, X_val, y_val, epochs=12, batch_size=32, device=device
+        lstm_forecaster, X_train, y_train, X_val, y_val, epochs=12, batch_size=32,
+        class_weights=class_weights, device=device
     )
     lstm_eval = evaluate_forecaster_multistep(lstm_forecaster, X_test, y_test, device=device)
     logger.info(
@@ -331,7 +400,8 @@ def main() -> None:
         input_dim=27, d_model=64, nhead=4, num_layers=2, horizon=horizon, num_classes=5
     )
     tf_forecaster = train_temporal_forecaster(
-        tf_forecaster, X_train, y_train, X_val, y_val, epochs=12, batch_size=32, device=device
+        tf_forecaster, X_train, y_train, X_val, y_val, epochs=12, batch_size=32,
+        class_weights=class_weights, device=device
     )
     tf_eval = evaluate_forecaster_multistep(tf_forecaster, X_test, y_test, device=device)
     logger.info(

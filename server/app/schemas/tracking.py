@@ -115,6 +115,27 @@ class ForecastResultOut(BaseModel):
     model_used: str = "NONE"
 
 
+class FlaggedPacketOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    id: str
+    timestamp: datetime
+    src_ip: str
+    src_port: int
+    dst_ip: str
+    dst_port: int
+    protocol: str  # TCP | UDP | ICMP | DNS | HTTP | HTTPS
+    length: int
+    tcp_flags: str | None = None
+    severity: str = "benign"  # critical | high | medium | low | benign
+    verdict: str = "NORMAL"  # HARMFUL | SUSPICIOUS | NORMAL
+    threat_type: str = "Benign Traffic"
+    reason: str
+    mitre_ref: str | None = None
+    payload_preview: str | None = None
+    is_harmful: bool = False
+    remediation_hint: str | None = None
+
 
 class TrackingResultsOut(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
@@ -132,4 +153,8 @@ class TrackingResultsOut(BaseModel):
     window_count: int | None = None
     graph_summary: dict[str, Any] | None = None
     forecast: ForecastResultOut | None = None
+    flagged_packets: list[FlaggedPacketOut] = Field(default_factory=list)
+    harmful_packet_count: int = 0
+    suspicious_packet_count: int = 0
+    normal_packet_count: int = 0
 

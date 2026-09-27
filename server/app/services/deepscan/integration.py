@@ -271,23 +271,32 @@ def _persist_host(db: Session, org_id: str, ip: str, scan: dict, cve_result: dic
             }
         )
 
+    from app.services.deepscan.remediation import enrich_service_port
+
     # wire the device into the topology so the engine can trace a path to it
     _shape_and_connect(db, org_id, asset, scan, cve_result)
 
-    return {
-        "asset_id": asset.id,
-        "target": ip,
-        "os": asset.os,
-        "services": [
+    enriched_services = [
+        enrich_service_port(
             {
                 "port": s["port"],
                 "protocol": s.get("protocol", "tcp"),
                 "service_name": s.get("service_name") or "unknown",
                 "product": s.get("product"),
                 "version": s.get("version"),
-            }
-            for s in scan.get("services", [])
-        ],
+                "cpe": s.get("cpe"),
+                "banner": s.get("banner"),
+            },
+            cves_out,
+        )
+        for s in scan.get("services", [])
+    ]
+
+    return {
+        "asset_id": asset.id,
+        "target": ip,
+        "os": asset.os,
+        "services": enriched_services,
         "ports": sorted({s["port"] for s in scan.get("services", [])}),
         "cves": cves_out,
     }

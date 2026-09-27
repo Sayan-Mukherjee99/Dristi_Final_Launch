@@ -73,8 +73,75 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)]
 
 
+class FastMultiheadAttention(nn.Module):
+    """Multi-head attention leveraging torch.nn.functional.scaled_dot_product_attention.
+
+    Utilizes fused kernel paths (FlashAttention / Memory-Efficient attention) for reduced latency.
+    """
+
+    def __init__(self, d_model: int = 64, nhead: int = 4, dropout: float = 0.2) -> None:
+        super().__init__()
+        assert d_model % nhead == 0, f"d_model ({d_model}) must be divisible by nhead ({nhead})"
+        self.d_model = d_model
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
+        self.dropout = dropout
+
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
+        # x: [B, T, d_model]
+        b_sz, seq_len, _ = x.shape
+        qkv = self.qkv_proj(x)  # [B, T, 3 * d_model]
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        # Reshape to [B, nhead, T, head_dim]
+        q = q.view(b_sz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        k = k.view(b_sz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        v = v.view(b_sz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+
+        drop_p = self.dropout if self.training else 0.0
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, dropout_p=drop_p, is_causal=False
+        )
+
+        # Transpose back: [B, nhead, T, head_dim] -> [B, T, d_model]
+        attn_out = attn_out.transpose(1, 2).contiguous().view(b_sz, seq_len, self.d_model)
+        return self.out_proj(attn_out)
+
+
+class FastTransformerEncoderLayer(nn.Module):
+    """Transformer encoder layer leveraging FastMultiheadAttention (SDPA)."""
+
+    def __init__(
+        self,
+        d_model: int = 64,
+        nhead: int = 4,
+        dim_feedforward: int = 128,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
+        self.self_attn = FastMultiheadAttention(d_model=d_model, nhead=nhead, dropout=dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.ReLU()
+
+    def forward(self, src: torch.Tensor) -> torch.Tensor:
+        # Self-attention block with residual connection
+        src2 = self.self_attn(src)
+        src = self.norm1(src + self.dropout(src2))
+        # Feedforward block with residual connection
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = self.norm2(src + self.dropout(src2))
+        return src
+
+
 class TransformerDetector(BaseTemporalModel):
-    """Multi-Head Self-Attention Transformer encoder for sliding traffic window sequences.
+    """Multi-Head Self-Attention Transformer encoder with fused Scaled Dot-Product Attention.
 
     Input tensor shape: [batch_size, seq_len=5, feature_dim=27]
     Output: logits [batch_size, num_classes], embedding [batch_size, d_model]
@@ -94,15 +161,15 @@ class TransformerDetector(BaseTemporalModel):
         self.d_model = d_model
         self.input_projection = nn.Linear(input_dim, d_model)
         self.pos_encoder = PositionalEncoding(d_model=d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            activation="relu",
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.layers = nn.ModuleList([
+            FastTransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+            )
+            for _ in range(num_layers)
+        ])
         self.fc = nn.Sequential(
             nn.Linear(d_model, 64),
             nn.ReLU(),
@@ -114,8 +181,9 @@ class TransformerDetector(BaseTemporalModel):
         # x: [B, T, D]
         proj = self.input_projection(x)  # [B, T, d_model]
         encoded = self.pos_encoder(proj)
-        out = self.transformer_encoder(encoded)  # [B, T, d_model]
+        for layer in self.layers:
+            encoded = layer(encoded)
         # Mean pooling across sequence dimension
-        pooled = torch.mean(out, dim=1)  # [B, d_model]
+        pooled = torch.mean(encoded, dim=1)  # [B, d_model]
         logits = self.fc(pooled)
         return logits, pooled

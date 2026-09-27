@@ -41,8 +41,11 @@ def get_platform_adapter() -> BasePlatformAdapter:
     elif sys.platform == "darwin":
         from macos.platform import MacOSPlatformAdapter
         return MacOSPlatformAdapter()
+    elif sys.platform.startswith("linux"):
+        from linux.platform import LinuxPlatformAdapter
+        return LinuxPlatformAdapter()
     else:
-        # Default Unix / POSIX fallback using standard Python libraries
-        from windows.platform import WindowsPlatformAdapter
-        return WindowsPlatformAdapter()
+        # Default Unix / POSIX fallback using Linux platform adapter
+        from linux.platform import LinuxPlatformAdapter
+        return LinuxPlatformAdapter()
 

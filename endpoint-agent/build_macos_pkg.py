@@ -1,25 +1,42 @@
 #!/usr/bin/env python3
 """
-Drishti Endpoint Agent - macOS Distributable Installer (.pkg) Builder
-Generates a standard Apple Flat Package (XAR format containing PackageInfo, Payload, Scripts)
-compatible with macOS `installer` CLI and macOS Installer.app GUI.
+Drishti Endpoint Agent - macOS Distributable Installer (.pkg) & App Builder
+Generates separate Apple Silicon (arm64, M1-M4) and Intel (x86_64) packages and apps:
+  - Drishti-Endpoint-Agent-macOS-Silicon.pkg & Drishti-Endpoint-Agent-macOS-Silicon.app
+  - Drishti-Endpoint-Agent-macOS-Intel.pkg & Drishti-Endpoint-Agent-macOS-Intel.app
 """
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import hashlib
 import os
 import shutil
 import struct
 import sys
+import zipfile
 import zlib
 from pathlib import Path
 
 
+def delete_existing_pkg_files(paths: list[Path]) -> list[Path]:
+    """Deletes existing .pkg files across specified directory paths."""
+    deleted = []
+    for base_dir in paths:
+        if base_dir.exists() and base_dir.is_dir():
+            for pkg_file in base_dir.rglob("*.pkg"):
+                try:
+                    pkg_file.unlink()
+                    deleted.append(pkg_file)
+                    print(f"[-] Deleted existing legacy package: {pkg_file}")
+                except Exception as e:
+                    print(f"[!] Warning: failed to delete {pkg_file}: {e}")
+    return deleted
+
+
 def make_cpio_entry(filename: str, content: bytes, mode: int = 0o100644, ino: int = 1, mtime: int = 1726000000) -> bytes:
     """Creates a single entry in standard SVR4 portable cpio (newc: 070701)."""
-    # Normalize paths to use forward slashes and no leading slash
     filename = filename.replace("\\", "/").lstrip("/")
     name_bytes = filename.encode("utf-8") + b"\x00"
     name_len = len(name_bytes)
@@ -78,8 +95,7 @@ def build_xar_package(files: list[tuple[str, bytes]], output_path: Path) -> None
     `files` is a list of (name, bytes) tuples for files in the archive (PackageInfo, Payload, Scripts, etc.).
     """
     heap_data = bytearray()
-    # Reserve 20 bytes for SHA1 checksum of TOC at start of heap
-    heap_data.extend(b"\x00" * 20)
+    heap_data.extend(b"\x00" * 20)  # SHA-1 TOC checksum placeholder
 
     file_nodes = []
     for idx, (name, data) in enumerate(files, start=1):
@@ -116,7 +132,6 @@ def build_xar_package(files: list[tuple[str, bytes]], output_path: Path) -> None
     toc_comp = zlib.compress(toc_xml)
     toc_compressed = len(toc_comp)
 
-    # Compute TOC SHA1 checksum and place at heap offset 0
     toc_sha1 = hashlib.sha1(toc_comp).digest()
     heap_data[0:20] = toc_sha1
 
@@ -131,13 +146,48 @@ def build_xar_package(files: list[tuple[str, bytes]], output_path: Path) -> None
         f.write(header + toc_comp + bytes(heap_data))
 
 
-def generate_macos_pkg(agent_root: Path, output_file: Path) -> None:
-    """Builds the complete macOS .pkg installer."""
-    print(f"[*] Packaging Drishti Endpoint Agent for macOS from {agent_root}...")
+def get_architecture_specs(arch: str) -> dict[str, str]:
+    """Returns architecture-specific build parameters."""
+    normalized = arch.lower().strip()
+    if normalized in ("silicon", "arm64", "apple_silicon", "aarch64"):
+        return {
+            "arch_key": "silicon",
+            "arch_name": "Apple Silicon",
+            "host_arch": "arm64",
+            "pkg_filename": "Drishti-Endpoint-Agent-macOS-Silicon.pkg",
+            "app_name": "Drishti-Endpoint-Agent-macOS-Silicon.app",
+            "identifier": "com.drishti.endpointagent.silicon",
+            "python_search": '"$AGENT_HOME/.venv/bin/python" /opt/homebrew/bin/python3 /usr/bin/python3 /usr/local/bin/python3 python3',
+            "min_macos_ver": "11.0",
+        }
+    elif normalized in ("intel", "x86_64", "x64"):
+        return {
+            "arch_key": "intel",
+            "arch_name": "Intel x86_64",
+            "host_arch": "x86_64",
+            "pkg_filename": "Drishti-Endpoint-Agent-macOS-Intel.pkg",
+            "app_name": "Drishti-Endpoint-Agent-macOS-Intel.app",
+            "identifier": "com.drishti.endpointagent.intel",
+            "python_search": '"$AGENT_HOME/.venv/bin/python" /usr/local/bin/python3 /usr/bin/python3 python3',
+            "min_macos_ver": "10.15",
+        }
+    else:
+        raise ValueError(f"Unsupported macOS architecture: {arch}. Choose 'silicon' or 'intel'.")
 
-    # Launcher wrapper script for macOS
-    launcher_sh = b"""#!/usr/bin/env bash
-# Drishti Endpoint Agent - macOS Launcher
+
+def generate_macos_pkg(agent_root: Path, output_file: Path, arch: str = "silicon") -> None:
+    """Builds an architecture-specific macOS .pkg installer."""
+    spec = get_architecture_specs(arch)
+    arch_name = spec["arch_name"]
+    host_arch = spec["host_arch"]
+    identifier = spec["identifier"]
+    python_search = spec["python_search"]
+
+    print(f"[*] Packaging Drishti Endpoint Agent for macOS [{arch_name} ({host_arch})] -> {output_file.name}...")
+
+    # Architecture-tuned launcher script
+    launcher_sh = f"""#!/usr/bin/env bash
+# Drishti Endpoint Agent - macOS [{arch_name}] Launcher
 set -e
 
 AGENT_HOME="/Library/Application Support/Drishti/endpoint-agent"
@@ -150,9 +200,9 @@ if [ -f "/etc/drishti/agent.conf" ]; then
     set +a
 fi
 
-# Detect Python 3
+# Detect Python 3 prioritizing {arch_name} environment
 PYTHON_BIN=""
-for candidate in "$AGENT_HOME/.venv/bin/python" /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/bin/python3 python3; do
+for candidate in {python_search}; do
     if command -v "$candidate" >/dev/null 2>&1; then
         PYTHON_BIN="$(command -v "$candidate")"
         break
@@ -160,7 +210,7 @@ for candidate in "$AGENT_HOME/.venv/bin/python" /usr/local/bin/python3 /opt/home
 done
 
 if [ -z "$PYTHON_BIN" ]; then
-    echo "[Drishti] ERROR: Python 3 not found on this macOS system." >&2
+    echo "[Drishti] ERROR: Python 3 not found on this {arch_name} macOS system." >&2
     echo "[Drishti] Please install Python 3 via Homebrew or Xcode Command Line Tools." >&2
     exit 1
 fi
@@ -168,7 +218,7 @@ fi
 # Auto-setup venv if psutil is not yet installed in host environment
 if ! "$PYTHON_BIN" -c "import psutil" >/dev/null 2>&1; then
     if [ ! -d "$AGENT_HOME/.venv" ]; then
-        echo "[Drishti] Setting up endpoint agent isolated environment..."
+        echo "[Drishti] Setting up {arch_name} endpoint agent isolated environment..."
         "$PYTHON_BIN" -m venv "$AGENT_HOME/.venv" >/dev/null 2>&1 || true
         if [ -f "$AGENT_HOME/.venv/bin/pip" ]; then
             "$AGENT_HOME/.venv/bin/pip" install -r "$AGENT_HOME/requirements.txt" -q >/dev/null 2>&1 || true
@@ -180,15 +230,15 @@ if ! "$PYTHON_BIN" -c "import psutil" >/dev/null 2>&1; then
 fi
 
 exec "$PYTHON_BIN" "$AGENT_HOME/cli.py" "$@"
-"""
+""".encode("utf-8")
 
-    # LaunchDaemon plist template
-    launchd_plist = b"""<?xml version="1.0" encoding="UTF-8"?>
+    # Architecture-specific LaunchDaemon plist
+    launchd_plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.drishti.endpointagent</string>
+    <string>{identifier}</string>
     <key>ProgramArguments</key>
     <array>
         <string>/Library/Application Support/Drishti/endpoint-agent/drishti-agent-launcher.sh</string>
@@ -205,16 +255,14 @@ exec "$PYTHON_BIN" "$AGENT_HOME/cli.py" "$@"
     <string>/Library/Application Support/Drishti/endpoint-agent</string>
 </dict>
 </plist>
-"""
+""".encode("utf-8")
 
-    # Default configuration file template
     default_conf = b"""# Drishti Endpoint Agent Configuration
 # Set the backend URL for your Drishti server instance:
 DRISHTI_SERVER_URL=http://localhost:8000
 """
 
-    # postinstall script
-    postinstall_sh = b"""#!/bin/bash
+    postinstall_sh = f"""#!/bin/bash
 set -e
 
 AGENT_DIR="/Library/Application Support/Drishti/endpoint-agent"
@@ -235,31 +283,30 @@ EOF
 fi
 
 if [ -d "/Library/LaunchDaemons" ]; then
-    cp "$AGENT_DIR/com.drishti.endpointagent.plist" "/Library/LaunchDaemons/com.drishti.endpointagent.plist"
-    chmod 644 "/Library/LaunchDaemons/com.drishti.endpointagent.plist"
-    chown root:wheel "/Library/LaunchDaemons/com.drishti.endpointagent.plist" 2>/dev/null || true
+    cp "$AGENT_DIR/com.drishti.endpointagent.plist" "/Library/LaunchDaemons/{identifier}.plist"
+    chmod 644 "/Library/LaunchDaemons/{identifier}.plist"
+    chown root:wheel "/Library/LaunchDaemons/{identifier}.plist" 2>/dev/null || true
 fi
 
 echo "================================================================="
-echo "  Drishti Endpoint Agent installed successfully!"
+echo "  Drishti Endpoint Agent [{arch_name}] installed successfully!"
+echo "  Architecture: {host_arch}"
 echo "  Target: $AGENT_DIR"
 echo "  Command: drishti-endpoint-agent"
 echo "  Configuration: /etc/drishti/agent.conf or --server <URL>"
 echo "================================================================="
 exit 0
-"""
+""".encode("utf-8")
 
-    # Build Payload CPIO entries
-    # Target directory on macOS: Library/Application Support/Drishti/endpoint-agent/
     target_prefix = "Library/Application Support/Drishti/endpoint-agent"
     cpio_parts = []
     ino = 100
 
-    # Add directories
     for d in [
         target_prefix,
         f"{target_prefix}/common",
         f"{target_prefix}/macos",
+        f"{target_prefix}/linux",
         f"{target_prefix}/collectors",
         f"{target_prefix}/transport",
         f"{target_prefix}/storage",
@@ -269,7 +316,6 @@ exit 0
         ino += 1
         cpio_parts.append(make_cpio_entry(d, b"", mode=0o040755, ino=ino))
 
-    # Add wrapper scripts and configs to payload
     ino += 1
     cpio_parts.append(make_cpio_entry(f"{target_prefix}/drishti-agent-launcher.sh", launcher_sh, mode=0o100755, ino=ino))
     ino += 1
@@ -277,7 +323,6 @@ exit 0
     ino += 1
     cpio_parts.append(make_cpio_entry("etc/drishti/agent.conf.default", default_conf, mode=0o100644, ino=ino))
 
-    # Walk endpoint-agent source files (excluding caches, tests, venvs, dist)
     exclude_dirs = {".pytest_cache", "__pycache__", "tests", ".venv", ".build-venv", "dist", "build"}
     for root, dirs, files in os.walk(agent_root):
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
@@ -287,22 +332,19 @@ exit 0
             src_file = Path(root) / f
             rel_path = src_file.relative_to(agent_root).as_posix()
             dest_path = f"{target_prefix}/{rel_path}"
-            
+
             with open(src_file, "rb") as sf:
                 content = sf.read()
-            
+
             ino += 1
             mode = 0o100755 if f in ("cli.py", "agent.py") else 0o100644
             cpio_parts.append(make_cpio_entry(dest_path, content, mode=mode, ino=ino))
 
-    # Add trailer to payload
     ino += 1
     cpio_parts.append(make_cpio_trailer(ino=ino))
     payload_raw = b"".join(cpio_parts)
     payload_gz = gzip.compress(payload_raw, mtime=0)
-    print(f"[*] Payload archive size: {len(payload_gz)} bytes ({len(payload_raw)} uncompressed, {ino - 100} entries)")
 
-    # Build Scripts CPIO
     scripts_parts = [
         make_cpio_entry("postinstall", postinstall_sh, mode=0o100755, ino=1),
         make_cpio_trailer(ino=2),
@@ -310,16 +352,14 @@ exit 0
     scripts_raw = b"".join(scripts_parts)
     scripts_gz = gzip.compress(scripts_raw, mtime=0)
 
-    # Build PackageInfo XML
     install_kbytes = max(1, (len(payload_raw) + 1023) // 1024)
-    package_info = f"""<pkg-info format-version="2" identifier="com.drishti.endpointagent" version="0.1.0" install-location="/" auth="root">
+    package_info = f"""<pkg-info format-version="2" identifier="{identifier}" version="0.1.0" install-location="/" auth="root" hostArchitectures="{host_arch}">
     <payload installKBytes="{install_kbytes}" numberOfFiles="{ino - 100}"/>
     <scripts>
         <postinstall file="./postinstall"/>
     </scripts>
 </pkg-info>""".encode("utf-8")
 
-    # Assemble XAR Package
     xar_entries = [
         ("PackageInfo", package_info),
         ("Payload", payload_gz),
@@ -327,26 +367,166 @@ exit 0
     ]
 
     build_xar_package(xar_entries, output_file)
-    print(f"[+] Successfully generated macOS package: {output_file} ({output_file.stat().st_size} bytes)")
+    print(f"[+] Successfully generated {arch_name} package: {output_file} ({output_file.stat().st_size} bytes)")
+
+
+def generate_macos_app(agent_root: Path, output_app_dir: Path, arch: str = "silicon") -> Path:
+    """Builds a standalone macOS Application bundle (.app) and zips it."""
+    spec = get_architecture_specs(arch)
+    arch_name = spec["arch_name"]
+    host_arch = spec["host_arch"]
+    identifier = spec["identifier"]
+    python_search = spec["python_search"]
+    min_ver = spec["min_macos_ver"]
+
+    app_contents = output_app_dir / "Contents"
+    macos_dir = app_contents / "MacOS"
+    resources_dir = app_contents / "Resources"
+    agent_bundle_dir = resources_dir / "agent"
+
+    if output_app_dir.exists():
+        shutil.rmtree(output_app_dir)
+
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    agent_bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    # Info.plist
+    info_plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleName</key>
+    <string>Drishti Endpoint Agent</string>
+    <key>CFBundleDisplayName</key>
+    <string>Drishti Endpoint Agent ({arch_name})</string>
+    <key>CFBundleIdentifier</key>
+    <string>{identifier}</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>drishti-agent</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>{min_ver}</string>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>{host_arch}</string>
+    </array>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"""
+    (app_contents / "Info.plist").write_text(info_plist, encoding="utf-8")
+    (app_contents / "PkgInfo").write_bytes(b"APPL????")
+
+    # Executable launcher in Contents/MacOS/drishti-agent
+    launcher_script = f"""#!/usr/bin/env bash
+# Drishti Endpoint Agent - macOS App Launcher [{arch_name}]
+DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+APP_HOME="$(cd "$DIR/../Resources/agent" && pwd)"
+cd "$APP_HOME"
+
+PYTHON_BIN=""
+for candidate in {python_search}; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v "$candidate")"
+        break
+    fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+    osascript -e 'display alert "Drishti Endpoint Agent" message "Python 3 is required for {arch_name}. Please install Python 3 via Xcode Command Line Tools or Homebrew."'
+    exit 1
+fi
+
+exec "$PYTHON_BIN" "$APP_HOME/cli.py" "$@"
+"""
+    launcher_path = macos_dir / "drishti-agent"
+    launcher_path.write_text(launcher_script, encoding="utf-8")
+    launcher_path.chmod(0o755)
+
+    # Copy agent source tree into Contents/Resources/agent
+    exclude_dirs = {".pytest_cache", "__pycache__", "tests", ".venv", ".build-venv", "dist", "build"}
+    for root, dirs, files in os.walk(agent_root):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        for f in files:
+            if f.endswith(".pyc") or f.endswith(".pyo") or f.startswith(".") or f.startswith("build_"):
+                continue
+            src_file = Path(root) / f
+            rel_path = src_file.relative_to(agent_root)
+            dest_file = agent_bundle_dir / rel_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dest_file)
+
+    print(f"[+] Built {arch_name} App Bundle: {output_app_dir}")
+
+    # Create distributable zip of the .app
+    zip_path = output_app_dir.parent / f"{output_app_dir.name}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(output_app_dir):
+            for file in files:
+                full_path = Path(root) / file
+                rel_path = full_path.relative_to(output_app_dir.parent)
+                zf.write(full_path, rel_path)
+    print(f"[+] Packaged {arch_name} App zip: {zip_path} ({zip_path.stat().st_size} bytes)")
+    return output_app_dir
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Drishti Endpoint Agent macOS Packager")
+    parser.add_argument(
+        "--arch",
+        choices=["silicon", "intel", "all"],
+        default="all",
+        help="Target architecture: silicon (arm64), intel (x86_64), or all (default)",
+    )
+    args = parser.parse_args()
+
     agent_dir = Path(__file__).resolve().parent
     workspace_root = agent_dir.parent
 
-    # Output to endpoint-agent/dist/ and workspace dist/
     dist_dir_local = agent_dir / "dist"
     dist_dir_workspace = workspace_root / "dist"
     dist_dir_local.mkdir(parents=True, exist_ok=True)
     dist_dir_workspace.mkdir(parents=True, exist_ok=True)
 
-    pkg_name = "Drishti-Endpoint-Agent-macOS.pkg"
-    target_local = dist_dir_local / pkg_name
-    target_workspace = dist_dir_workspace / pkg_name
+    # 1. Delete all existing legacy .pkg files
+    print("[*] Deleting any existing .pkg files...")
+    delete_existing_pkg_files([agent_dir, workspace_root, dist_dir_local, dist_dir_workspace])
 
-    generate_macos_pkg(agent_dir, target_local)
-    shutil.copy2(target_local, target_workspace)
-    print(f"[+] Mirrored package to workspace: {target_workspace}")
+    targets = ["silicon", "intel"] if args.arch == "all" else [args.arch]
+
+    for target_arch in targets:
+        spec = get_architecture_specs(target_arch)
+        pkg_name = spec["pkg_filename"]
+        app_name = spec["app_name"]
+
+        # Build .pkg installer
+        target_pkg_local = dist_dir_local / pkg_name
+        target_pkg_workspace = dist_dir_workspace / pkg_name
+        generate_macos_pkg(agent_dir, target_pkg_local, arch=target_arch)
+        shutil.copy2(target_pkg_local, target_pkg_workspace)
+        print(f"[+] Mirrored {pkg_name} to workspace: {target_pkg_workspace}")
+
+        # Build .app application bundle & zip
+        app_dir_local = dist_dir_local / app_name
+        app_dir_workspace = dist_dir_workspace / app_name
+        generate_macos_app(agent_dir, app_dir_local, arch=target_arch)
+        if app_dir_workspace.exists():
+            shutil.rmtree(app_dir_workspace)
+        shutil.copytree(app_dir_local, app_dir_workspace)
+
+        zip_local = dist_dir_local / f"{app_name}.zip"
+        zip_workspace = dist_dir_workspace / f"{app_name}.zip"
+        if zip_local.exists():
+            shutil.copy2(zip_local, zip_workspace)
+        print(f"[+] Mirrored {app_name} to workspace: {app_dir_workspace}")
+
+    print("\n[✓] All requested macOS packages and applications built successfully!")
 
 
 if __name__ == "__main__":

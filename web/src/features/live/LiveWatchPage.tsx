@@ -51,6 +51,7 @@ import {
   Server,
   Wifi,
   Apple,
+  Wrench,
 } from "lucide-react";
 
 import { useMemo, useState } from "react";
@@ -68,6 +69,7 @@ import type {
   DeepScanCve,
   DeepScanRangeResult,
   DeepScanResult,
+  DeepScanService,
   LiveThreat,
   NetworkDevice,
   NetworkThreat,
@@ -3211,6 +3213,166 @@ export function EndpointAgentSection({ device: d }: { device: NetworkDevice }) {
   );
 }
 
+export function DeepScanPortItem({
+  service: s,
+  cves: allCves = [],
+  onNavigate,
+}: {
+  service: DeepScanService;
+  cves?: DeepScanCve[];
+  onNavigate?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Match CVEs if not already directly attached to service
+  const matchedCves: DeepScanCve[] = (s.cves && s.cves.length > 0)
+    ? s.cves
+    : (allCves || []).filter((c: DeepScanCve) => {
+        const prod = (s.product || "").toLowerCase();
+        const sName = (s.service_name || "").toLowerCase();
+        const aff = (c.affected_service || "").toLowerCase();
+        return (prod && aff.includes(prod)) || (sName && aff.includes(sName));
+      });
+
+  const topCvss = matchedCves.length > 0
+    ? Math.max(...matchedCves.map((c: DeepScanCve) => c.cvss))
+    : (s.vulnerability_score ?? 0);
+
+  const isVulnerable = matchedCves.length > 0 || s.finding_state === "VULNERABLE" || (s.vulnerability_score != null && s.vulnerability_score >= 7.0 && s.severity !== "secure");
+  const isExposed = !isVulnerable && ([23, 445, 139, 3389, 5900, 21, 80].includes(s.port) || s.finding_state === "EXPOSED" || topCvss > 0);
+
+  const scoreColor = isVulnerable
+    ? (topCvss >= 9 ? "#f43f5e" : topCvss >= 7 ? "#f97316" : "#eab308")
+    : isExposed
+    ? "#a855f7"
+    : "#10b981";
+
+  const statusLabel = isVulnerable
+    ? `VULNERABLE (SCORE: ${topCvss.toFixed(1)})`
+    : isExposed
+    ? `EXPOSED (SCORE: ${topCvss > 0 ? topCvss.toFixed(1) : "4.0"})`
+    : `SECURE (SCORE: 0.0)`;
+
+  const solutionText = s.solution || (
+    isVulnerable
+      ? `Update ${s.product || s.service_name} to the latest security patch release to address known CVE vulnerabilities. Restrict port ${s.port} access using firewall rules.`
+      : isExposed
+      ? `Port ${s.port} exposes a sensitive or unencrypted protocol. Enforce encryption or restrict access to trusted networks.`
+      : `Port ${s.port} is open with no identified vulnerabilities. Keep software updated and restrict external exposure if not required.`
+  );
+
+  const steps: string[] = s.remediation_steps && s.remediation_steps.length > 0
+    ? s.remediation_steps
+    : [
+        `Audit network service running on port ${s.port}/${s.protocol}.`,
+        `Apply host firewall rules to restrict inbound access to authorized IPs only.`,
+        `Keep ${s.product || s.service_name} updated to latest vendor security release.`
+      ];
+
+  const firstFindingId = matchedCves.find((c: DeepScanCve) => c.finding_id)?.finding_id;
+
+  return (
+    <div
+      className="rounded-lg border p-3 font-mono text-[11px] transition-all bg-canvas space-y-2"
+      style={{
+        borderColor: `${scoreColor}50`,
+        backgroundColor: `${scoreColor}0a`,
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-bold text-accent-400 text-small">
+            {s.port}/{s.protocol.toUpperCase()}
+          </span>
+          <span className="text-ink font-semibold">{s.service_name}</span>
+          <span className="text-ink-muted text-[10.5px]">
+            {[s.product, s.version].filter(Boolean).join(" ") || "version unknown"}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span
+            className="rounded px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider font-mono border"
+            style={{
+              backgroundColor: `${scoreColor}1a`,
+              color: scoreColor,
+              borderColor: `${scoreColor}50`,
+            }}
+          >
+            {statusLabel}
+          </span>
+          <button
+            type="button"
+            onClick={() => setExpanded(!expanded)}
+            className="flex items-center gap-1 rounded border border-hairline bg-surface-2 px-2 py-0.5 text-[9.5px] font-medium text-ink-secondary hover:text-ink hover:border-hairline/80 transition-colors"
+          >
+            <Wrench className="h-3 w-3 text-accent-400" />
+            <span>{expanded ? "Hide Solution" : "View Solution"}</span>
+            {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Matched CVE chips if any */}
+      {matchedCves.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pt-1 border-t border-hairline/40">
+          <span className="text-[9.5px] text-ink-muted flex items-center gap-1">
+            <Bug className="h-3 w-3 text-rose-400" /> CVEs:
+          </span>
+          {matchedCves.map((c: DeepScanCve) => (
+            <span
+              key={c.id}
+              className="inline-flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-1.5 py-0.5 text-[9px] text-rose-300"
+            >
+              <span className="font-bold">{c.id}</span>
+              <span className="text-[8px] text-rose-400 font-semibold">CVSS {c.cvss.toFixed(1)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Solution & Remediation Box */}
+      {expanded && (
+        <div className="rounded-md border border-accent-500/30 bg-surface-2/95 p-3 space-y-2 text-[10.5px]">
+          <div className="flex items-center justify-between border-b border-hairline/50 pb-1.5">
+            <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-accent-400 font-mono text-[10.5px]">
+              <Wrench className="h-3.5 w-3.5 text-accent-400" />
+              Remediation Solution for Port {s.port}/{s.protocol}
+            </div>
+            {firstFindingId && (
+              <Link
+                to={`/app/remediate/${firstFindingId}`}
+                onClick={onNavigate}
+                className="inline-flex items-center gap-1 text-[9.5px] font-bold text-accent-400 hover:text-accent-300 transition-colors"
+              >
+                <Terminal className="h-3 w-3" /> Auto-Remediate <ExternalLink className="h-3 w-3" />
+              </Link>
+            )}
+          </div>
+
+          <p className="text-ink leading-relaxed font-sans text-[11px]">
+            {solutionText}
+          </p>
+
+          <div className="space-y-1 pt-1 border-t border-hairline/30">
+            <div className="text-[9.5px] font-bold uppercase tracking-wider text-ink-muted">
+              Recommended Fix Steps:
+            </div>
+            <ul className="space-y-1">
+              {steps.map((st: string, idx: number) => (
+                <li key={idx} className="flex items-start gap-1.5 text-ink-secondary text-[10.5px]">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0 mt-0.5" />
+                  <span className="font-mono text-[10px]">{st}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DeviceDetail({
   device: d,
   threats = [],
@@ -3438,33 +3600,17 @@ function DeviceDetail({
             </div>
 
             {d.services && d.services.length > 0 && (
-              <div className="space-y-1">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Open Ports &amp; Services:</div>
-                <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
-                  {d.services.map((s) => {
-                    const isExposed = [3389, 445, 23, 21, 5900, 139].includes(s.port);
-                    return (
-                      <div key={`${s.port}/${s.protocol}`} className="flex items-center justify-between rounded bg-canvas px-2.5 py-1 text-[11px] font-mono">
-                        <div className="flex items-center gap-2">
-                          <span className="text-accent-400 font-bold">{s.port}/{s.protocol}</span>
-                          <span className="text-ink">{s.service_name}</span>
-                          <span className="text-ink-muted truncate max-w-[120px]">
-                            {[s.product, s.version].filter(Boolean).join(" ") || "version unknown"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.2 text-[8.5px] font-bold text-emerald-400">
-                            [OPEN]
-                          </span>
-                          {isExposed && (
-                            <span className="rounded border border-rose-500/40 bg-rose-500/10 px-1 py-0.2 text-[8.5px] font-bold text-rose-400">
-                              [EXPOSED]
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Open Ports &amp; Services ({d.services.length}):</div>
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {d.services.map((s) => (
+                    <DeepScanPortItem
+                      key={`${s.port}/${s.protocol}`}
+                      service={s}
+                      cves={d.cves}
+                      onNavigate={onClose}
+                    />
+                  ))}
                 </div>
               </div>
             )}
@@ -3826,22 +3972,16 @@ function DeepScanResultView({
           <Network className="h-3.5 w-3.5" /> Open ports &amp; services ({r.services.length})
         </div>
         {r.services.length === 0 ? (
-          <p className="text-[11px] text-ink-muted">No open ports detected on the top 1000.</p>
+          <p className="text-[11px] text-ink-muted">No open ports detected on the scanned service ports.</p>
         ) : (
-          <div className="space-y-1">
+          <div className="space-y-2">
             {r.services.map((s) => (
-              <div
+              <DeepScanPortItem
                 key={`${s.port}/${s.protocol}`}
-                className="flex items-center gap-2 rounded-sm bg-canvas px-2 py-1 font-mono text-[11px]"
-              >
-                <span className="text-accent-400">
-                  {s.port}/{s.protocol}
-                </span>
-                <span className="text-ink">{s.service_name}</span>
-                <span className="ml-auto truncate text-ink-muted">
-                  {[s.product, s.version].filter(Boolean).join(" ") || "version unknown"}
-                </span>
-              </div>
+                service={s}
+                cves={cves}
+                onNavigate={onClose}
+              />
             ))}
           </div>
         )}

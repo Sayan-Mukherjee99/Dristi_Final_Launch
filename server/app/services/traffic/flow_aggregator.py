@@ -10,6 +10,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+from app.services.traffic.packet_inspector import PacketInspector
+from app.schemas.tracking import FlaggedPacketOut
+
+
 def _shannon_entropy(data: bytes) -> float:
     if not data:
         return 0.0
@@ -150,6 +154,14 @@ class FlowAggregator:
         self.start_time: float = time.time()
         self.last_event_time: float | None = None
 
+        self.inspector = PacketInspector(target_ip=self.target_ip)
+        self.total_syn_packets: int = 0
+        self.active_attack_category: str | None = None
+
+    def set_active_attack_category(self, cat: str | None) -> None:
+        with self._lock:
+            self.active_attack_category = cat
+
     def ingest_packet(
         self,
         src_ip: str,
@@ -236,18 +248,23 @@ class FlowAggregator:
                 flow.total_fwd_bytes += length
                 if flow.last_fwd_time is not None:
                     flow.fwd_iat_samples.append(max(0.0, ts - flow.last_fwd_time))
+                    if len(flow.fwd_iat_samples) > 200:
+                        flow.fwd_iat_samples = flow.fwd_iat_samples[-100:]
                 flow.last_fwd_time = ts
             else:
                 flow.total_bwd_packets += 1
                 flow.total_bwd_bytes += length
                 if flow.last_bwd_time is not None:
                     flow.bwd_iat_samples.append(max(0.0, ts - flow.last_bwd_time))
+                    if len(flow.bwd_iat_samples) > 200:
+                        flow.bwd_iat_samples = flow.bwd_iat_samples[-100:]
                 flow.last_bwd_time = ts
 
             if tcp_flags:
                 if isinstance(tcp_flags, dict):
                     if tcp_flags.get("SYN"):
                         flow.flag_syn_count += 1
+                        self.total_syn_packets += 1
                     if tcp_flags.get("ACK"):
                         flow.flag_ack_count += 1
                     if tcp_flags.get("FIN"):
@@ -261,6 +278,7 @@ class FlowAggregator:
                 elif isinstance(tcp_flags, str):
                     if "S" in tcp_flags:
                         flow.flag_syn_count += 1
+                        self.total_syn_packets += 1
                     if "A" in tcp_flags:
                         flow.flag_ack_count += 1
                     if "F" in tcp_flags:
@@ -272,13 +290,37 @@ class FlowAggregator:
                     if "U" in tcp_flags:
                         flow.flag_urg_count += 1
 
-
             if ttl is not None:
                 flow.ttl_samples.append(ttl)
+                if len(flow.ttl_samples) > 200:
+                    flow.ttl_samples = flow.ttl_samples[-100:]
             if tcp_window is not None:
                 flow.tcp_window_samples.append(tcp_window)
+                if len(flow.tcp_window_samples) > 200:
+                    flow.tcp_window_samples = flow.tcp_window_samples[-100:]
             if payload and len(flow.payload_sample_bytes) < 4096:
                 flow.payload_sample_bytes.extend(payload[:512])
+
+            now = time.time()
+            duration = max(1.0, now - self.start_time)
+            pps = self.total_packets / duration
+            self.inspector.inspect_and_record(
+                src_ip=src,
+                dst_ip=dst,
+                src_port=src_port,
+                dst_port=dst_port,
+                protocol=proto_num,
+                length=length,
+                tcp_flags=tcp_flags,
+                ttl=ttl,
+                tcp_window=tcp_window,
+                payload=payload,
+                timestamp=ts,
+                active_attack_category=self.active_attack_category,
+                current_pps=pps,
+                current_syn_count=self.total_syn_packets,
+                unique_dst_ports=len(self.unique_dst_ports),
+            )
 
         return True
 
@@ -318,3 +360,17 @@ class FlowAggregator:
     def get_all_flows(self) -> list[FlowRecord]:
         with self._lock:
             return list(self.flows.values())
+
+    def get_flagged_packets(
+        self, limit: int = 100, filter_verdict: str | None = None
+    ) -> list[FlaggedPacketOut]:
+        with self._lock:
+            return self.inspector.get_flagged_packets(limit=limit, filter_verdict=filter_verdict)
+
+    def get_packet_harm_stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "harmful": self.inspector.harmful_packet_count,
+                "suspicious": self.inspector.suspicious_packet_count,
+                "normal": self.inspector.normal_packet_count,
+            }

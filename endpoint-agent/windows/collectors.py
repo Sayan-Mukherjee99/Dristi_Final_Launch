@@ -331,8 +331,179 @@ class WindowsServiceCollector(BaseServiceCollector):
         return services
 
 
+import ipaddress
+import struct
+
+# Cache reverse DNS lookups to avoid per-cycle latency
+_REVERSE_DNS_CACHE: dict[str, str | None] = {}
+
+
+def _is_internet_address(ip_str: str) -> bool:
+    """Returns True if IP address is a public, routable internet address."""
+    if not ip_str or ip_str in ("0.0.0.0", "127.0.0.1", "::", "::1", "*", "localhost"):
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+        return not (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+    except Exception:
+        return False
+
+
+def _resolve_internet_host(ip_str: str) -> str | None:
+    """Resolves IP to domain name / hostname using cached reverse DNS."""
+    if not _is_internet_address(ip_str):
+        return None
+    if ip_str in _REVERSE_DNS_CACHE:
+        return _REVERSE_DNS_CACHE[ip_str]
+    try:
+        host, _ = socket.getnameinfo((ip_str, 0), socket.NI_NAMEREQD)
+        _REVERSE_DNS_CACHE[ip_str] = host
+        return host
+    except Exception:
+        _REVERSE_DNS_CACHE[ip_str] = None
+        return None
+
+
+def _infer_website_url(remote_ip: str, remote_port: int, destination_host: str | None = None) -> str | None:
+    """Infers website URL from remote IP/port/host if web protocol is detected."""
+    target = destination_host or remote_ip
+    if remote_port == 443:
+        return f"https://{target}"
+    elif remote_port == 80:
+        return f"http://{target}"
+    elif remote_port in (8080, 8443, 8000, 8888, 3000):
+        proto = "https" if remote_port in (8443,) else "http"
+        return f"{proto}://{target}:{remote_port}"
+    elif _is_internet_address(remote_ip):
+        proto = "https" if remote_port == 443 else "http"
+        return f"{proto}://{target}:{remote_port}"
+    return None
+
+
+def _query_windows_kernel_tcp_table() -> list[dict[str, Any]]:
+    """Directly queries tcpip.sys kernel socket structures in memory via iphlpapi.GetExtendedTcpTable.
+
+    Provides true kernel-level TCP table inspection with exact owning PID, connection state,
+    and 5-tuple without requiring third-party drivers.
+    """
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        import ctypes
+        iphlpapi = ctypes.WinDLL("iphlpapi.dll")
+        GetExtendedTcpTable = iphlpapi.GetExtendedTcpTable
+
+        # TCP_TABLE_OWNER_PID_ALL = 5, AF_INET = 2
+        pdwSize = ctypes.c_ulong(0)
+        res = GetExtendedTcpTable(None, ctypes.byref(pdwSize), False, 2, 5, 0)
+        if res != 122 and res != 0:  # 122 = ERROR_INSUFFICIENT_BUFFER
+            return []
+
+        buf = ctypes.create_string_buffer(pdwSize.value)
+        res = GetExtendedTcpTable(buf, ctypes.byref(pdwSize), False, 2, 5, 0)
+        if res != 0:
+            return []
+
+        num_entries = struct.unpack_from("<I", buf.raw, 0)[0]
+        row_size = 24  # MIB_TCPROW_OWNER_PID is 6 x DWORD = 24 bytes
+        offset = 4
+
+        tcp_states = {
+            1: "CLOSED", 2: "LISTEN", 3: "SYN_SENT", 4: "SYN_RCVD",
+            5: "ESTABLISHED", 6: "FIN_WAIT1", 7: "FIN_WAIT2",
+            8: "CLOSE_WAIT", 9: "CLOSING", 10: "LAST_ACK",
+            11: "TIME_WAIT", 12: "DELETE_TCB"
+        }
+
+        results = []
+        for _ in range(num_entries):
+            if offset + row_size > len(buf.raw):
+                break
+            state_code, local_addr_int, local_port_int, remote_addr_int, remote_port_int, pid = struct.unpack_from(
+                "<IIIIII", buf.raw, offset
+            )
+            offset += row_size
+
+            # In MIB_TCPROW, ports are stored in network byte order in lower 16 bits
+            local_port = ((local_port_int & 0xFF) << 8) | ((local_port_int >> 8) & 0xFF)
+            remote_port = ((remote_port_int & 0xFF) << 8) | ((remote_port_int >> 8) & 0xFF)
+            local_ip = socket.inet_ntoa(struct.pack("<I", local_addr_int))
+            remote_ip = socket.inet_ntoa(struct.pack("<I", remote_addr_int))
+            state = tcp_states.get(state_code, "UNKNOWN")
+
+            results.append({
+                "pid": pid,
+                "protocol": "TCP",
+                "local_address": local_ip,
+                "local_port": local_port,
+                "remote_address": remote_ip,
+                "remote_port": remote_port,
+                "state": state,
+                "source": "windows_kernel_tcpip",
+            })
+        return results
+    except Exception as e:
+        logger.debug("Windows kernel extended TCP table inspection failed: %s", e)
+        return []
+
+
+def _query_windows_kernel_udp_table() -> list[dict[str, Any]]:
+    """Directly queries tcpip.sys kernel UDP socket structures via iphlpapi.GetExtendedUdpTable."""
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        import ctypes
+        iphlpapi = ctypes.WinDLL("iphlpapi.dll")
+        GetExtendedUdpTable = iphlpapi.GetExtendedUdpTable
+
+        # UDP_TABLE_OWNER_PID = 1, AF_INET = 2
+        pdwSize = ctypes.c_ulong(0)
+        res = GetExtendedUdpTable(None, ctypes.byref(pdwSize), False, 2, 1, 0)
+        if res != 122 and res != 0:
+            return []
+
+        buf = ctypes.create_string_buffer(pdwSize.value)
+        res = GetExtendedUdpTable(buf, ctypes.byref(pdwSize), False, 2, 1, 0)
+        if res != 0:
+            return []
+
+        num_entries = struct.unpack_from("<I", buf.raw, 0)[0]
+        row_size = 12  # MIB_UDPROW_OWNER_PID is 3 x DWORD = 12 bytes
+        offset = 4
+
+        results = []
+        for _ in range(num_entries):
+            if offset + row_size > len(buf.raw):
+                break
+            local_addr_int, local_port_int, pid = struct.unpack_from("<III", buf.raw, offset)
+            offset += row_size
+            local_port = ((local_port_int & 0xFF) << 8) | ((local_port_int >> 8) & 0xFF)
+            local_ip = socket.inet_ntoa(struct.pack("<I", local_addr_int))
+            results.append({
+                "pid": pid,
+                "protocol": "UDP",
+                "local_address": local_ip,
+                "local_port": local_port,
+                "remote_address": "0.0.0.0",
+                "remote_port": 0,
+                "state": "OPEN",
+                "source": "windows_kernel_tcpip",
+            })
+        return results
+    except Exception as e:
+        logger.debug("Windows kernel extended UDP table inspection failed: %s", e)
+        return []
+
+
 class WindowsSocketCollector(BaseSocketCollector):
-    """Gathers local listening sockets and process network connections."""
+    """Gathers local listening sockets and process network connections using Windows kernel APIs."""
 
     def __init__(self, source_label: str = "windows_endpoint"):
         self.source_label = source_label
@@ -350,102 +521,22 @@ class WindowsSocketCollector(BaseSocketCollector):
             except Exception:
                 continue
 
-        net_conns = []
-        try:
-            net_conns = psutil.net_connections(kind="inet")
-        except Exception as e:
-            logger.debug("psutil.net_connections failed: %s, falling back to per-process enumeration", e)
-            for p in psutil.process_iter(["pid", "name"]):
-                try:
-                    for c in p.net_connections(kind="inet"):
-                        net_conns.append(c)
-                except Exception:
-                    continue
+        # 1. Primary: Windows kernel socket table extraction from tcpip.sys
+        kernel_conns = _query_windows_kernel_tcp_table() + _query_windows_kernel_udp_table()
 
-        # If still empty on Windows, parse netstat -ano fallback
-        if not net_conns and sys.platform.startswith("win"):
-            try:
-                import subprocess
-                res = subprocess.run(
-                    ["netstat", "-ano"],
-                    capture_output=True,
-                    text=True,
-                    timeout=3.0,
-                )
-                if res.returncode == 0:
-                    for line in res.stdout.splitlines():
-                        parts = line.strip().split()
-                        if len(parts) >= 4 and parts[0].upper() in ("TCP", "UDP"):
-                            proto = parts[0].upper()
-                            l_str = parts[1]
-                            r_str = parts[2]
-                            st = parts[3] if proto == "TCP" and len(parts) >= 5 else "ESTABLISHED"
-                            pid_str = parts[-1]
-                            try:
-                                pid = int(pid_str)
-                            except ValueError:
-                                pid = None
-                            pname = pid_names.get(pid) if pid else None
-
-                            if ":" in l_str:
-                                lip, lport_s = l_str.rsplit(":", 1)
-                                try:
-                                    lport = int(lport_s)
-                                except ValueError:
-                                    continue
-                            else:
-                                continue
-
-                            if st.upper() == "LISTENING":
-                                listening_ports.append(
-                                    ListeningPortItem(
-                                        protocol=proto,
-                                        local_address=lip,
-                                        local_port=lport,
-                                        pid=pid,
-                                        process_name=pname,
-                                        observed_at=now_iso,
-                                        source=self.source_label,
-                                    )
-                                )
-                            elif ":" in r_str and r_str != "*:*":
-                                rip, rport_s = r_str.rsplit(":", 1)
-                                try:
-                                    rport = int(rport_s)
-                                except ValueError:
-                                    continue
-                                connections.append(
-                                    SocketConnectionItem(
-                                        pid=pid,
-                                        process_name=pname,
-                                        protocol=proto,
-                                        local_address=lip,
-                                        local_port=lport,
-                                        remote_address=rip,
-                                        remote_port=rport,
-                                        state=st.upper(),
-                                        observed_at=now_iso,
-                                        source=self.source_label,
-                                    )
-                                )
-            except Exception as ex:
-                logger.debug("netstat fallback encountered error: %s", ex)
-
-        for conn in net_conns:
-            try:
-                proto = "TCP" if conn.type == socket.SOCK_STREAM else "UDP"
-                laddr = conn.laddr
-                raddr = conn.raddr
-                pid = conn.pid
+        if kernel_conns:
+            for item in kernel_conns:
+                pid = item.get("pid")
                 proc_name = pid_names.get(pid) if pid else None
+                proto = item["protocol"]
+                local_ip = item["local_address"]
+                local_port = item["local_port"]
+                remote_ip = item["remote_address"]
+                remote_port = item["remote_port"]
+                state = item["state"]
+                src_label = item.get("source", "windows_kernel_tcpip")
 
-                if not laddr:
-                    continue
-
-                local_ip = laddr.ip
-                local_port = laddr.port
-
-                if conn.status == psutil.CONN_LISTEN:
+                if state == "LISTEN" or (proto == "UDP" and remote_ip in ("0.0.0.0", "*", "")):
                     listening_ports.append(
                         ListeningPortItem(
                             protocol=proto,
@@ -454,14 +545,12 @@ class WindowsSocketCollector(BaseSocketCollector):
                             pid=pid,
                             process_name=proc_name,
                             observed_at=now_iso,
-                            source=self.source_label,
+                            source=src_label,
                         )
                     )
-                elif raddr:
-                    remote_ip = raddr.ip
-                    remote_port = raddr.port
-                    state = str(conn.status or "ESTABLISHED").upper()
-
+                elif remote_ip and remote_ip not in ("0.0.0.0", "*"):
+                    dest_host = _resolve_internet_host(remote_ip)
+                    web_url = _infer_website_url(remote_ip, remote_port, dest_host)
                     connections.append(
                         SocketConnectionItem(
                             pid=pid,
@@ -472,12 +561,150 @@ class WindowsSocketCollector(BaseSocketCollector):
                             remote_address=remote_ip,
                             remote_port=remote_port,
                             state=state,
+                            destination_host=dest_host,
+                            website_url=web_url,
                             observed_at=now_iso,
-                            source=self.source_label,
+                            source=src_label,
                         )
                     )
-            except Exception:
-                continue
+        else:
+            # 2. Fallback: psutil net_connections & netstat
+            net_conns = []
+            try:
+                net_conns = psutil.net_connections(kind="inet")
+            except Exception as e:
+                logger.debug("psutil.net_connections failed: %s, falling back to per-process enumeration", e)
+                for p in psutil.process_iter(["pid", "name"]):
+                    try:
+                        for c in p.net_connections(kind="inet"):
+                            net_conns.append(c)
+                    except Exception:
+                        continue
+
+            # If still empty on Windows, parse netstat -ano fallback
+            if not net_conns and sys.platform.startswith("win"):
+                try:
+                    import subprocess
+                    res = subprocess.run(
+                        ["netstat", "-ano"],
+                        capture_output=True,
+                        text=True,
+                        timeout=3.0,
+                    )
+                    if res.returncode == 0:
+                        for line in res.stdout.splitlines():
+                            parts = line.strip().split()
+                            if len(parts) >= 4 and parts[0].upper() in ("TCP", "UDP"):
+                                proto = parts[0].upper()
+                                l_str = parts[1]
+                                r_str = parts[2]
+                                st = parts[3] if proto == "TCP" and len(parts) >= 5 else "ESTABLISHED"
+                                pid_str = parts[-1]
+                                try:
+                                    pid = int(pid_str)
+                                except ValueError:
+                                    pid = None
+                                pname = pid_names.get(pid) if pid else None
+
+                                if ":" in l_str:
+                                    lip, lport_s = l_str.rsplit(":", 1)
+                                    try:
+                                        lport = int(lport_s)
+                                    except ValueError:
+                                        continue
+                                else:
+                                    continue
+
+                                if st.upper() == "LISTENING":
+                                    listening_ports.append(
+                                        ListeningPortItem(
+                                            protocol=proto,
+                                            local_address=lip,
+                                            local_port=lport,
+                                            pid=pid,
+                                            process_name=pname,
+                                            observed_at=now_iso,
+                                            source=self.source_label,
+                                        )
+                                    )
+                                elif ":" in r_str and r_str != "*:*":
+                                    rip, rport_s = r_str.rsplit(":", 1)
+                                    try:
+                                        rport = int(rport_s)
+                                    except ValueError:
+                                        continue
+                                    dhost = _resolve_internet_host(rip)
+                                    wurl = _infer_website_url(rip, rport, dhost)
+                                    connections.append(
+                                        SocketConnectionItem(
+                                            pid=pid,
+                                            process_name=pname,
+                                            protocol=proto,
+                                            local_address=lip,
+                                            local_port=lport,
+                                            remote_address=rip,
+                                            remote_port=rport,
+                                            state=st.upper(),
+                                            destination_host=dhost,
+                                            website_url=wurl,
+                                            observed_at=now_iso,
+                                            source=self.source_label,
+                                        )
+                                    )
+                except Exception as ex:
+                    logger.debug("netstat fallback encountered error: %s", ex)
+
+            for conn in net_conns:
+                try:
+                    proto = "TCP" if conn.type == socket.SOCK_STREAM else "UDP"
+                    laddr = conn.laddr
+                    raddr = conn.raddr
+                    pid = conn.pid
+                    proc_name = pid_names.get(pid) if pid else None
+
+                    if not laddr:
+                        continue
+
+                    local_ip = laddr.ip
+                    local_port = laddr.port
+
+                    if conn.status == psutil.CONN_LISTEN:
+                        listening_ports.append(
+                            ListeningPortItem(
+                                protocol=proto,
+                                local_address=local_ip,
+                                local_port=local_port,
+                                pid=pid,
+                                process_name=proc_name,
+                                observed_at=now_iso,
+                                source=self.source_label,
+                            )
+                        )
+                    elif raddr:
+                        remote_ip = raddr.ip
+                        remote_port = raddr.port
+                        state = str(conn.status or "ESTABLISHED").upper()
+                        dest_host = _resolve_internet_host(remote_ip)
+                        web_url = _infer_website_url(remote_ip, remote_port, dest_host)
+
+                        connections.append(
+                            SocketConnectionItem(
+                                pid=pid,
+                                process_name=proc_name,
+                                protocol=proto,
+                                local_address=local_ip,
+                                local_port=local_port,
+                                remote_address=remote_ip,
+                                remote_port=remote_port,
+                                state=state,
+                                destination_host=dest_host,
+                                website_url=web_url,
+                                observed_at=now_iso,
+                                source=self.source_label,
+                            )
+                        )
+                except Exception:
+                    continue
 
         # Sort for deterministic reporting
         listening_ports.sort(key=lambda x: (x.local_port, x.protocol))
